@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.config }}
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Not recursive: libvncserver carries two submodules of its own -- a web
+          # client and a stylesheet for its documentation -- and neither is built.
+          submodules: true
+
+      # The three libraries under deps/ are built from source, and libjpeg-turbo is
+      # the slow one: it is an ExternalProject, so it is a configure and a build of
+      # its own. Its output only changes when the submodule does, so it is keyed on
+      # their revisions rather than on anything in this repository.
+      - name: Submodule revisions
+        id: deps
+        shell: bash
+        run: |
+          echo "rev=$(git submodule status | awk '{print $1}' | tr -d '\n' \
+            | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/deps/libjpeg-turbo
+            build/LauncherJpeg-prefix
+          key: jpeg-${{ runner.os }}-${{ steps.deps.outputs.rev }}
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }}
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Launcher-${{ matrix.config }}-x64
+          path: Output/x64/${{ matrix.config }}/Launcher.exe
+          if-no-files-found: error

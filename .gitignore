@@ -1,0 +1,11 @@
+# Build output
+/Output
+/build
+/Binaries
+
+# vcpkg's manifest-mode install directory, when the build directory is not used
+/vcpkg_installed
+
+# Per-machine editor and assistant state, which holds local paths
+/.vs
+/.claude
