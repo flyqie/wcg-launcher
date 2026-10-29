@@ -46,6 +46,7 @@ namespace
 	};
 
 	ActionQueue gPending;
+	bool gResetInput = false;
 	mutex gPendingLock;
 
 	// Set whenever something is posted, and waited on by the frame loop so that input is
@@ -75,49 +76,33 @@ namespace
 		{
 			lock_guard<mutex> Lock(gPendingLock);
 
-			// Motion can arrive much faster than the desktop can apply it. When there is
-			// no button transition or wheel event between two pointer actions, only the
-			// newest position matters. Keep transitions as separate actions so dragging
-			// and button state remain lossless.
+			// Motion without a button transition can replace the previous position.
 			if (Pending.What == Action::Pointer && gPending.Count)
 			{
 				Action& Last = gPending.Items[(gPending.Tail + gPending.Count - 1) % MaxPending];
 
 				if (Last.What == Action::Pointer
 					&& Last.ButtonMask == Pending.ButtonMask
-					&& !(Last.ButtonMask & PointerWheelBits)
 					&& !(Pending.ButtonMask & PointerWheelBits))
 				{
 					Last.X = Pending.X;
 					Last.Y = Pending.Y;
-				}
-				else
-				{
-					if (gPending.Count == MaxPending)
-					{
-						// Full. Drop the oldest rather than the newest: the newest is what the
-						// viewer just did, and the oldest is what they have already moved past.
-						gPending.Tail = (gPending.Tail + 1) % MaxPending;
-						--gPending.Count;
-					}
-
-					gPending.Items[(gPending.Tail + gPending.Count) % MaxPending] = Pending;
-					++gPending.Count;
+					Wake();
+					return;
 				}
 			}
-			else
+
+			if (gPending.Count == MaxPending)
 			{
-				if (gPending.Count == MaxPending)
-				{
-					// Full. Drop the oldest rather than the newest: the newest is what the
-					// viewer just did, and the oldest is what they have already moved past.
-					gPending.Tail = (gPending.Tail + 1) % MaxPending;
-					--gPending.Count;
-				}
-
-				gPending.Items[(gPending.Tail + gPending.Count) % MaxPending] = Pending;
-				++gPending.Count;
+				// The batch is no longer lossless. Release what was injected before
+				// accepting fresh input, rather than dropping a release and sticking a key.
+				gPending.Tail = 0;
+				gPending.Count = 0;
+				gResetInput = true;
 			}
+
+			gPending.Items[(gPending.Tail + gPending.Count) % MaxPending] = Pending;
+			++gPending.Count;
 		}
 
 		Wake();
@@ -202,17 +187,20 @@ void Handover::PostCutText(const char* Text, int Length)
 	Wake();
 }
 
-void Handover::Apply(rfbScreenInfoPtr Screen)
+bool Handover::Apply(rfbScreenInfoPtr Screen)
 {
 	Action Local[MaxPending];
 	unsigned Count = 0;
 	string CutText;
 	bool bHaveCutText = false;
+	bool bResetInput = false;
 
 	{
 		lock_guard<mutex> Lock(gPendingLock);
 
 		Count = TakeLocked(Local, MaxPending);
+		bResetInput = gResetInput;
+		gResetInput = false;
 
 		if (gHasPendingCutText)
 		{
@@ -220,6 +208,11 @@ void Handover::Apply(rfbScreenInfoPtr Screen)
 			gHasPendingCutText = false;
 			bHaveCutText = true;
 		}
+	}
+
+	if (bResetInput)
+	{
+		Input::ReleaseAll();
 	}
 
 	for (unsigned i = 0; i < Count; ++i)
@@ -240,4 +233,6 @@ void Handover::Apply(rfbScreenInfoPtr Screen)
 	{
 		Clipboard::ApplyText(CutText);
 	}
+
+	return Count != 0 || bHaveCutText || bResetInput;
 }

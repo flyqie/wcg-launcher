@@ -18,6 +18,9 @@ namespace Input
 	void ApplyKey(unsigned long KeySym, bool bDown);
 	void ApplyPointer(rfbScreenInfoPtr Screen, int ButtonMask, int X, int Y);
 
+	// Recovers the shared injected state after queue overflow. The frame loop's.
+	void ReleaseAll();
+
 	// Where the viewer's pointer last was, in frame coordinates.
 	void PointerPosition(int& X, int& Y);
 }

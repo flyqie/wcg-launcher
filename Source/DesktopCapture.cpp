@@ -21,6 +21,39 @@ using namespace std;
 
 namespace
 {
+	// Restores selected objects before deleting a DC, including on capture failure.
+	struct MemoryDc
+	{
+		HDC Dc;
+		HGDIOBJ Previous = NULL;
+
+		explicit MemoryDc(HDC Source) : Dc(CreateCompatibleDC(Source)) {}
+		~MemoryDc()
+		{
+			if (Dc)
+			{
+				if (Previous) { SelectObject(Dc, Previous); }
+				DeleteDC(Dc);
+			}
+		}
+
+		bool Select(HBITMAP Bitmap)
+		{
+			if (!Dc || !Bitmap) { return false; }
+			Previous = SelectObject(Dc, Bitmap);
+			return Previous && Previous != HGDI_ERROR;
+		}
+
+		MemoryDc(const MemoryDc&) = delete;
+		MemoryDc& operator=(const MemoryDc&) = delete;
+	};
+
+	struct ScreenDc
+	{
+		HDC Dc = GetDC(NULL);
+		~ScreenDc() { if (Dc) { ReleaseDC(NULL, Dc); } }
+	};
+
 	// Windows' WM_PRINT reaches children through its PRF_CHILDREN pass, and that
 	// pass does not reliably draw themed common controls -- a status bar comes out
 	// with its background but no parts. Every visible descendant is therefore
@@ -132,7 +165,7 @@ namespace
 			}
 
 			RECT r;
-			GetWindowRect(*it, &r);
+			if (!GetWindowRect(*it, &r)) { continue; }
 
 			POINT OldOrigin;
 			SetViewportOrgEx(hdc, r.left - OriginX, r.top - OriginY, &OldOrigin);
@@ -154,9 +187,13 @@ namespace
 	BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam)
 	{
 		EnumWindowParam* Param = (EnumWindowParam*)lParam;
-		WINDOWINFO WindowInfo;
+		WINDOWINFO WindowInfo = {};
+		WindowInfo.cbSize = sizeof(WindowInfo);
 
-		GetWindowInfo(hwnd, &WindowInfo);
+		if (!GetWindowInfo(hwnd, &WindowInfo))
+		{
+			return TRUE;
+		}
 
 		// A minimized window has no pixels to paint, and it is not lost by being
 		// skipped: the dock keeps a button for it. See Dock.h.
@@ -166,7 +203,7 @@ namespace
 		}
 
 		RECT r;
-		GetWindowRect(hwnd, &r);
+		if (!GetWindowRect(hwnd, &r)) { return TRUE; }
 
 		// Where the window's rect starts, which is not where it is drawn.
 		//
@@ -299,7 +336,8 @@ bool Desktop::Capture(Frame& Out)
 	LARGE_INTEGER TotalStart;
 	Begin(TotalStart);
 
-	HDC hdcSource = GetDC(NULL);
+	ScreenDc Source;
+	HDC hdcSource = Source.Dc;
 
 	if (!hdcSource)
 	{
@@ -310,7 +348,11 @@ bool Desktop::Capture(Frame& Out)
 	int capX = GetDeviceCaps(hdcSource, HORZRES);
 	int capY = GetDeviceCaps(hdcSource, VERTRES);
 
-	HDC hdcMemory = CreateCompatibleDC(hdcSource);
+	if (capX <= 0 || capY <= 0) { return false; }
+
+	MemoryDc Target(hdcSource);
+	HDC hdcMemory = Target.Dc;
+	if (!hdcMemory) { return false; }
 
 	// One scratch bitmap shared by every window and every frame, so it is not
 	// reallocated per window. Rebuilt only when the screen size changes, which it
@@ -342,16 +384,13 @@ bool Desktop::Capture(Frame& Out)
 	// The DC the scratch bitmap lives in, for the whole capture. Created after the
 	// bitmap so that the one select below is the only one needed, and released at the
 	// end of Capture.
-	HDC hdcScratch = CreateCompatibleDC(hdcSource);
+	MemoryDc ScratchDc(hdcSource);
+	HDC hdcScratch = ScratchDc.Dc;
 
-	if (!hdcScratch)
+	if (!ScratchDc.Select(ghTempBitmap))
 	{
-		ReleaseDC(NULL, hdcSource);
-
 		return false;
 	}
-
-	HGDIOBJ hScratchOld = SelectObject(hdcScratch, ghTempBitmap);
 
 	LARGE_INTEGER AllocStart;
 	Begin(AllocStart);
@@ -361,15 +400,10 @@ bool Desktop::Capture(Frame& Out)
 
 	gBreakdown.BitmapAlloc = Since(AllocStart);
 
-	if (!hBitmap)
+	if (!Target.Select(hBitmap))
 	{
-		DeleteDC(hdcMemory);
-		ReleaseDC(NULL, hdcSource);
-
 		return false;
 	}
-
-	HGDIOBJ hOldTarget = SelectObject(hdcMemory, hBitmap);
 
 	EnumWindowParam EnumParam;
 	EnumParam.ScreenWidth = capX;
@@ -415,14 +449,10 @@ bool Desktop::Capture(Frame& Out)
 	gBreakdown.TopLevelCalls = gTopLevelCalls;
 	gBreakdown.ChildCalls = gChildCalls;
 
-	// The scratch DC and the screen DC are done with. The frame's own DC stays open:
-	// the caller draws on the frame before finishing it, which is where the dock goes.
-	SelectObject(hdcScratch, hScratchOld);
-	DeleteDC(hdcScratch);
-	ReleaseDC(NULL, hdcSource);
-
+	// Transfer the target DC to the caller; the scratch and screen DCs stay scoped.
 	Out.Dc = hdcMemory;
-	Out.Previous = hOldTarget;
+	Out.Previous = Target.Previous;
+	Target.Dc = NULL;
 	Out.Bits = (const unsigned char*)Bits;
 	Out.Stride = capX * 4;
 	Out.Width = capX;
@@ -435,6 +465,10 @@ bool Desktop::Capture(Frame& Out)
 
 void Desktop::Finish(const Frame& In)
 {
+	// Complete this thread's batched GDI writes (including the dock) before the
+	// framebuffer diff reads the DIB through its CPU pointer.
+	GdiFlush();
+
 	// Deselect before the DC goes away: the bitmap outlives it, and the caller
 	// may still be holding Bits.
 	SelectObject(In.Dc, In.Previous);

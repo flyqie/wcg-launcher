@@ -28,6 +28,6 @@ namespace Handover
 	void PostKey(unsigned long KeySym, bool bDown);
 	void PostCutText(const char* Text, int Length);
 
-	// Everything posted, applied in order. The frame loop's.
-	void Apply(rfbScreenInfoPtr Screen);
+	// Everything posted, applied in order. True if input was applied. The frame loop's.
+	bool Apply(rfbScreenInfoPtr Screen);
 }

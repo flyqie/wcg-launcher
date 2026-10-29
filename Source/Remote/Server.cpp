@@ -7,6 +7,7 @@
 #include "Clipboard.h"
 #include "Cursor.h"
 #include "Frame.h"
+#include "FrameSchedule.h"
 #include "Handover.h"
 #include "Input.h"
 
@@ -241,7 +242,6 @@ namespace
 	{
 		struct PendingClient
 		{
-			rfbSocket Socket;
 			HANDLE Thread;
 		};
 
@@ -250,7 +250,7 @@ namespace
 
 		while (rfbClientPtr Client = rfbClientIteratorNext(Iterator))
 		{
-			PendingClient Stop = { Client->sock, NULL };
+			PendingClient Stop = { NULL };
 
 			if (Client->client_thread
 				&& Client->client_thread != (uintptr_t)-1
@@ -261,19 +261,17 @@ namespace
 				// original _beginthread handle when the client thread exits.
 			}
 
+			// Wake select/send without closing a socket the client thread still owns.
+			// The iterator keeps Client alive until we release it below.
+			rfbCloseClient(Client);
+			if (Client->sock != RFB_INVALID_SOCKET)
+			{
+				shutdown(Client->sock, SD_BOTH);
+			}
 			Pending.push_back(Stop);
 		}
 
 		rfbReleaseClientIterator(Iterator);
-
-		for (const PendingClient& Stop : Pending)
-		{
-			if (Stop.Socket != RFB_INVALID_SOCKET)
-			{
-				rfbSocket Socket = Stop.Socket;
-				rfbCloseSocket(Socket);
-			}
-		}
 
 		bool AllStopped = true;
 
@@ -287,6 +285,10 @@ namespace
 				}
 
 				CloseHandle(Stop.Thread);
+			}
+			else
+			{
+				AllStopped = false;
 			}
 		}
 
@@ -399,6 +401,8 @@ bool Server::Run()
 
 	// When the next frame falls due. Input is applied whenever it arrives, without one.
 	ULONGLONG NextFrame = GetTickCount64();
+	ULONGLONG LastFrame = 0;
+	ULONGLONG ActiveUntil = 0;
 
 	// How still the screen has to be, and for how long, before the capture rate backs
 	// off. See the note in the loop.
@@ -465,9 +469,13 @@ bool Server::Run()
 		LARGE_INTEGER InputStart;
 		BeginTimer(InputStart);
 
-		if (gScreen)
+		if (gScreen && Handover::Apply(gScreen))
 		{
-			Handover::Apply(gScreen);
+			const ULONGLONG AppliedAt = GetTickCount64();
+			FrameSchedule::OnInput(AppliedAt, LastFrame, FrameIntervalMs,
+				NextFrame, IdleFrames, Backoff);
+			// Keep small changes such as typing responsive between input events.
+			ActiveUntil = AppliedAt + 500;
 		}
 
 		const ULONGLONG InputUs = MicrosecondsSince(InputStart);
@@ -515,6 +523,8 @@ bool Server::Run()
 				}
 			}
 		}
+
+		LastFrame = GetTickCount64();
 
 		// The dock draws itself onto the frame between Capture and Finish, which is the
 		// only window in which a Frame is valid.
@@ -602,7 +612,7 @@ bool Server::Run()
 		Sample.Changed = Rects > 0;
 		Sample.Rects = (unsigned)Rects;
 		Sample.Clients = Viewers;
-		Sample.BytesSent = BytesSent();
+		Sample.BytesSent = gProfiling ? BytesSent() : 0;
 
 		FrameProfile::Add(Sample);
 		FrameProfile::Flush(FrameIntervalMs);
@@ -612,19 +622,17 @@ bool Server::Run()
 		// nothing about it is ours to make cheaper. Docs/PERFORMANCE.md sections 3 and 4
 		// record what was tried and measured dead.
 		//
-		// The interval doubles while the screen is nearly still, up to four doublings, and
+		// The interval doubles while the screen is nearly still, up to three doublings, and
 		// returns to one the moment anything moves. LAUNCHER_FPS stays the ceiling.
 		//
-		// Interactivity is unaffected: input wakes this loop directly, so a click is applied
-		// and a frame taken at once whatever the back-off had reached. What is delayed is a
-		// change made inside the container with nobody touching it -- a clock, a progress
-		// bar -- and only until the next look. The rate the profile prints is the rate
-		// actually achieved.
+		// Input resets the back-off and advances the deadline, but never closer than
+		// one base interval after the last capture. A short active window also keeps
+		// typing and other small changes from immediately falling back to idle rate.
 		{
 			const unsigned long long Still =
 				(unsigned long long)Captured.Width * Captured.Height / 100;
 
-			if (ChangedArea <= Still)
+			if (bCaptured && LastFrame >= ActiveUntil && ChangedArea <= Still)
 			{
 				if (++IdleFrames >= IdleFramesBeforeBackoff && Backoff < MaxBackoff)
 				{
@@ -662,20 +670,30 @@ bool Server::Run()
 		CloseHandle(hFrameTimer);
 	}
 
-	Handover::Close();
-
 	if (gScreen)
 	{
 		// Stop the listener first. On Win32, rfbCloseClient does not close the
 		// client socket, so client threads are drained explicitly below before
 		// rfbScreenCleanup frees the screen they reference.
+#if defined(LIBVNCSERVER_HAVE_WIN32THREADS)
+		HANDLE Listener = NULL;
+		const bool HaveListener = gScreen->listener_thread
+			&& gScreen->listener_thread != (uintptr_t)-1;
+		const bool CanWait = HaveListener
+			&& DuplicateHandle(GetCurrentProcess(), (HANDLE)gScreen->listener_thread,
+				GetCurrentProcess(), &Listener, SYNCHRONIZE, FALSE, 0);
+#endif
+
 		rfbShutdownServer(gScreen, FALSE);
 
 #if defined(LIBVNCSERVER_HAVE_WIN32THREADS)
-		if (gScreen->listener_thread)
+		const bool ListenerStopped = CanWait && WaitForSingleObject(Listener, 2000) == WAIT_OBJECT_0;
+		if (Listener) { CloseHandle(Listener); }
+		if (!ListenerStopped)
 		{
-			// _beginthread hands back a thread handle, which is what this holds.
-			WaitForSingleObject((HANDLE)gScreen->listener_thread, 2000);
+			Debug() << "VNC listener did not stop; retaining its resources until process exit" << endl;
+			gScreen = NULL;
+			return true;
 		}
 #endif
 
@@ -691,6 +709,8 @@ bool Server::Run()
 		rfbScreenCleanup(gScreen);
 		gScreen = NULL;
 	}
+
+	Handover::Close();
 
 	return true;
 }

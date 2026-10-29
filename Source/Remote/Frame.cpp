@@ -77,10 +77,14 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 	{
 		// The display mode changed under us. Hand libvncserver a new framebuffer
 		// at the new size and it tells every connected viewer about it.
-		gFrameBuffer.assign((size_t)Captured.Width * Captured.Height * 4, 0);
+		// Keep the old storage alive until libvncserver has locked out readers and
+		// switched the screen pointer. Resizing the live vector first can free it.
+		vector<unsigned char> Replacement((size_t)Captured.Width * Captured.Height * 4, 0);
 
-		rfbNewFramebuffer(Screen, (char*)gFrameBuffer.data(),
+		rfbNewFramebuffer(Screen, (char*)Replacement.data(),
 			Captured.Width, Captured.Height, 8, 3, 4);
+
+		gFrameBuffer.swap(Replacement);
 
 		// rfbNewFramebuffer rebuilds the pixel format from the byte count, which
 		// undoes the shifts set when the screen was created.

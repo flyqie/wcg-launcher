@@ -27,6 +27,13 @@ namespace
 	// viewer asked for without holding the modifier itself, released on key-up.
 	int gHeld = 0;
 	int gTyped = 0;
+	bool gKeysDown[256] = {};
+
+	void InjectKey(int VirtualKey, bool bDown)
+	{
+		Desktop::Key(VirtualKey, bDown);
+		gKeysDown[VirtualKey] = bDown;
+	}
 
 	// --- the keyboard -------------------------------------------------------
 
@@ -143,7 +150,7 @@ namespace
 	{
 		const int VirtualKey = (Bit == 1) ? VK_SHIFT : (Bit == 2) ? VK_CONTROL : VK_MENU;
 
-		Desktop::Key(VirtualKey, bDown);
+		InjectKey(VirtualKey, bDown);
 	}
 }
 
@@ -187,7 +194,7 @@ void Input::ApplyKey(unsigned long KeySym, bool bDown)
 		gTyped |= Needed;
 	}
 
-	Desktop::Key(VirtualKey, bDown);
+	InjectKey(VirtualKey, bDown);
 
 	if (!bDown && gTyped)
 	{
@@ -283,6 +290,24 @@ void Input::ApplyPointer(rfbScreenInfoPtr Screen, int ButtonMask, int X, int Y)
 	}
 
 	gButtonMask = ButtonMask;
+}
+
+void Input::ReleaseAll()
+{
+	for (int Key = 0; Key < 256; ++Key)
+	{
+		if (gKeysDown[Key]) { InjectKey(Key, false); }
+	}
+
+	for (int Bit = 0; Bit < 3; ++Bit)
+	{
+		if (gButtonMask & (1 << Bit)) { Desktop::PointerButton(Bit + 1, false); }
+	}
+
+	gHeld = 0;
+	gTyped = 0;
+	gButtonMask = 0;
+	gDockPress = false;
 }
 
 void Input::PointerPosition(int& X, int& Y)

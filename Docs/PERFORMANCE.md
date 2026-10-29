@@ -279,14 +279,16 @@ detector: **the comparison the loop already does**. It knows how much of the scr
 changed, and a frame in which almost nothing changed does not need the next one at full
 rate.
 
-So the interval doubles while the marked area stays under 1% of the screen — up to four
-doublings, an eighth of the rate — and returns to one the moment anything moves.
+So the interval doubles while the marked area stays under 1% of the screen — up to three
+doublings, an eighth of the rate — and returns to one when a larger change is seen.
 `LAUNCHER_FPS` stays the ceiling.
 
-**Nothing about interactivity is lost**, which is what makes this different from the
-one-second resync rejected above: input wakes the loop directly, so a click is applied
-and a frame taken at once whatever the back-off had reached. The rate the profile prints
-is the rate actually achieved, so this is visible rather than implied:
+Input wakes the loop directly and is applied without waiting for a capture. It also
+resets the back-off and advances the next capture, but never closer than one base frame
+interval after the previous capture. A 500 ms active window keeps small changes such as
+typing at the base rate instead of immediately backing off again. Autonomous changes
+still wait until the next idle capture. The rate the profile prints is the rate
+actually achieved:
 
 ```
 --- frame profile: 12 frames in 2016 ms (6 fps), 2 with changes, 1 viewer(s), 4 kB sent ---
