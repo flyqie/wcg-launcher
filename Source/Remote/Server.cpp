@@ -1,6 +1,8 @@
 #include "Server.h"
 
+#include <errno.h>
 #include <stdlib.h>
+#include <vector>
 
 #include "Clipboard.h"
 #include "Cursor.h"
@@ -230,6 +232,68 @@ namespace
 		return Total;
 	}
 
+#if defined(LIBVNCSERVER_HAVE_WIN32THREADS)
+	// libvncserver's Windows rfbCloseClient marks a client as shutting down but
+	// leaves its socket open. A client thread that is still in select() can therefore
+	// outlive the listener and keep the process alive. Stop the listener first, then
+	// close and join every client thread before the screen is freed.
+	bool CloseClientConnections(rfbScreenInfoPtr Screen)
+	{
+		struct PendingClient
+		{
+			rfbSocket Socket;
+			HANDLE Thread;
+		};
+
+		std::vector<PendingClient> Pending;
+		rfbClientIteratorPtr Iterator = rfbGetClientIterator(Screen);
+
+		while (rfbClientPtr Client = rfbClientIteratorNext(Iterator))
+		{
+			PendingClient Stop = { Client->sock, NULL };
+
+			if (Client->client_thread
+				&& Client->client_thread != (uintptr_t)-1
+				&& DuplicateHandle(GetCurrentProcess(), (HANDLE)Client->client_thread,
+					GetCurrentProcess(), &Stop.Thread, SYNCHRONIZE, FALSE, 0))
+			{
+				// The duplicate keeps the wait handle valid after the CRT closes the
+				// original _beginthread handle when the client thread exits.
+			}
+
+			Pending.push_back(Stop);
+		}
+
+		rfbReleaseClientIterator(Iterator);
+
+		for (const PendingClient& Stop : Pending)
+		{
+			if (Stop.Socket != RFB_INVALID_SOCKET)
+			{
+				rfbSocket Socket = Stop.Socket;
+				rfbCloseSocket(Socket);
+			}
+		}
+
+		bool AllStopped = true;
+
+		for (const PendingClient& Stop : Pending)
+		{
+			if (Stop.Thread)
+			{
+				if (WaitForSingleObject(Stop.Thread, 2000) != WAIT_OBJECT_0)
+				{
+					AllStopped = false;
+				}
+
+				CloseHandle(Stop.Thread);
+			}
+		}
+
+		return AllStopped;
+	}
+#endif
+
 	// Waits for the frame's slot or for input, whichever comes first. True if input
 	// arrived, in which case the caller should go round again rather than take a frame.
 	//
@@ -295,12 +359,15 @@ bool Server::Run()
 
 	{
 		char Value[16] = { 0 };
+		const DWORD Written = GetEnvironmentVariableA("LAUNCHER_FPS", Value, sizeof(Value));
 
-		if (GetEnvironmentVariableA("LAUNCHER_FPS", Value, sizeof(Value)))
+		if (Written > 0 && Written < sizeof(Value))
 		{
-			const int Fps = atoi(Value);
+			char* End = NULL;
+			errno = 0;
+			const long Fps = strtol(Value, &End, 10);
 
-			if (Fps >= 1 && Fps <= 240)
+			if (End != Value && *End == '\0' && errno != ERANGE && Fps >= 1 && Fps <= 240)
 			{
 				FrameIntervalMs = 1000 / (DWORD)Fps;
 			}
@@ -599,20 +666,25 @@ bool Server::Run()
 
 	if (gScreen)
 	{
-		// Closing the sockets is what makes the background threads notice, and on Windows
-		// that is all rfbShutdownServer does -- the join at the end of it is the pthread
-		// path. The listener notices on its next select timeout, 5 ms away, and until then
-		// it is still inside rfbProcessEvents holding the screen, so it is waited for
-		// rather than guessed at: the next thing that happens is freeing that screen.
-		//
-		// The per-client threads need no such care; they exit when their socket closes.
-		rfbShutdownServer(gScreen, TRUE);
+		// Stop the listener first. On Win32, rfbCloseClient does not close the
+		// client socket, so client threads are drained explicitly below before
+		// rfbScreenCleanup frees the screen they reference.
+		rfbShutdownServer(gScreen, FALSE);
 
 #if defined(LIBVNCSERVER_HAVE_WIN32THREADS)
 		if (gScreen->listener_thread)
 		{
 			// _beginthread hands back a thread handle, which is what this holds.
 			WaitForSingleObject((HANDLE)gScreen->listener_thread, 2000);
+		}
+#endif
+
+#if defined(LIBVNCSERVER_HAVE_WIN32THREADS)
+		if (!CloseClientConnections(gScreen))
+		{
+			Debug() << "A VNC client thread did not stop; leaving the screen allocated until process exit" << endl;
+			gScreen = NULL;
+			return true;
 		}
 #endif
 

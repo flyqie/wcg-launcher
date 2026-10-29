@@ -64,6 +64,10 @@ set(LAUNCHER_JPEG_INCLUDE_DIRS
 	"${CMAKE_SOURCE_DIR}/deps/libjpeg-turbo/src"
 	"${LAUNCHER_JPEG_BUILD_DIR}")
 
+# The imported library is an ExternalProject output rather than a CMake target. Declare
+# it explicitly so multi-config generators and incremental builds retain the dependency.
+set(LAUNCHER_JPEG_LIBRARY "${LAUNCHER_JPEG_BUILD_DIR}/$<CONFIG>/jpeg-static.lib")
+
 include(ExternalProject)
 
 ExternalProject_Add(LauncherJpeg
@@ -77,7 +81,5 @@ ExternalProject_Add(LauncherJpeg
 		-DWITH_TOOLS=OFF
 		-DWITH_TESTS=OFF
 		-DWITH_JAVA=OFF
+	BUILD_BYPRODUCTS "${LAUNCHER_JPEG_LIBRARY}"
 	INSTALL_COMMAND "")
-
-# Named jpeg-static.lib on MSVC, and jpeg.lib everywhere else.
-set(LAUNCHER_JPEG_LIBRARY "${LAUNCHER_JPEG_BUILD_DIR}/$<CONFIG>/jpeg-static.lib")

@@ -24,27 +24,48 @@
 
 namespace
 {
-	// Re-quotes one argument so it survives the trip through CreateProcess.
+	// Re-quotes one argument so it survives the trip through CreateProcess. Windows
+	// treats backslashes immediately before a quote, and trailing backslashes before
+	// the closing quote, specially. Doubling those runs is required to preserve the
+	// argument after CreateProcess parses the command line again.
 	std::wstring Quote(const std::wstring& Argument)
 	{
-		if (Argument.find_first_of(L" \t") == std::wstring::npos)
+		if (!Argument.empty()
+			&& Argument.find_first_of(L" \t\"") == std::wstring::npos)
 		{
 			return Argument;
 		}
 
 		std::wstring Quoted = L"\"";
+		size_t Backslashes = 0;
 
-		for (size_t i = 0; i < Argument.size(); ++i)
+		for (const wchar_t Character : Argument)
 		{
-			if (Argument[i] == L'"')
+			if (Character == L'\\')
 			{
-				Quoted += L'\\';
+				++Backslashes;
+				continue;
 			}
 
-			Quoted += Argument[i];
+			if (Character == L'"')
+			{
+				Quoted.append(Backslashes * 2 + 1, L'\\');
+				Quoted += L'"';
+				Backslashes = 0;
+				continue;
+			}
+
+			Quoted.append(Backslashes, L'\\');
+			Quoted += Character;
+			Backslashes = 0;
 		}
 
-		return Quoted + L"\"";
+		// Backslashes before the closing quote must also be doubled, otherwise the
+		// closing quote is interpreted as part of the argument.
+		Quoted.append(Backslashes * 2, L'\\');
+		Quoted += L'"';
+
+		return Quoted;
 	}
 }
 

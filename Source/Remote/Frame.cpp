@@ -29,6 +29,13 @@ namespace
 	// Bounded: each rectangle costs the viewer a header and at least one tile, so a change
 	// fragmented past this is cheaper to send as one box. See Update.
 	const unsigned MaxBands = 32;
+
+	unsigned long long Read64(const unsigned char* Data)
+	{
+		unsigned long long Value;
+		memcpy(&Value, Data, sizeof(Value));
+		return Value;
+	}
 }
 
 void Frame::ApplyServerFormat(rfbScreenInfoPtr Screen)
@@ -116,8 +123,8 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 		int First = 0;
 
 		while (First + 1 < Captured.Width
-			&& *(const unsigned long long*)(SourceRow + (size_t)First * 4)
-				== *(const unsigned long long*)(TargetRow + (size_t)First * 4))
+			&& Read64(SourceRow + (size_t)First * 4)
+				== Read64(TargetRow + (size_t)First * 4))
 		{
 			First += 2;
 		}
@@ -131,8 +138,8 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 		int Last = Captured.Width - 1;
 
 		while (Last - 1 > First
-			&& *(const unsigned long long*)(SourceRow + (size_t)(Last - 1) * 4)
-				== *(const unsigned long long*)(TargetRow + (size_t)(Last - 1) * 4))
+			&& Read64(SourceRow + (size_t)(Last - 1) * 4)
+				== Read64(TargetRow + (size_t)(Last - 1) * 4))
 		{
 			Last -= 2;
 		}

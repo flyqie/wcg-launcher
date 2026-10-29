@@ -11,25 +11,12 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Submodule revisions
-        id: deps
-        shell: bash
-        run: |
-          echo "rev=$(git submodule status | awk '{print $1}' | tr -d '\n' \
-            | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            build/deps/libjpeg-turbo
-            build/LauncherJpeg-prefix
-          key: jpeg-${{ runner.os }}-${{ steps.deps.outputs.rev }}
 
       - name: Configure
         run: cmake -S . -B build -A x64
@@ -37,7 +24,7 @@ jobs:
       # The link is checked as part of this, and a build that picked up a DLL fails
       # here rather than in a container.
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: Pack
         shell: pwsh

@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string>
 
@@ -73,13 +74,16 @@ int LauncherVncPort()
 
 		if (!Text.empty())
 		{
-			const int Port = atoi(Text.c_str());
+			char* End = NULL;
+			errno = 0;
+			const long Port = strtol(Text.c_str(), &End, 10);
 
-			// Below 1024 is a privileged port the container's account cannot bind, and
-			// above 65535 is not a port.
-			if (Port >= 1024 && Port <= 65535)
+			// Reject partial parses and overflow rather than accepting values such as
+			// "5900foo" as a valid port.
+			if (End != Text.c_str() && *End == '\0' && errno != ERANGE
+				&& Port >= 1024 && Port <= 65535)
 			{
-				return Port;
+				return (int)Port;
 			}
 		}
 
@@ -127,8 +131,24 @@ bool LauncherResolution(int& Width, int& Height)
 		return false;
 	}
 
-	const long W = wcstol(Value.c_str(), NULL, 10);
-	const long H = wcstol(Value.c_str() + Separator + 1, NULL, 10);
+	const wchar_t* WidthText = Value.c_str();
+	wchar_t* WidthEnd = NULL;
+	wchar_t* HeightEnd = NULL;
+	errno = 0;
+	const long W = wcstol(WidthText, &WidthEnd, 10);
+	const int SavedErrno = errno;
+	const wchar_t* HeightText = WidthText + Separator + 1;
+	errno = 0;
+	const long H = wcstol(HeightText, &HeightEnd, 10);
+
+	// Require both dimensions to consume exactly their side of the value. This avoids
+	// silently accepting values such as 1024x768debug or 1024x768x600.
+	if (WidthEnd != WidthText + Separator
+		|| HeightEnd != Value.c_str() + Value.size()
+		|| SavedErrno == ERANGE || errno == ERANGE)
+	{
+		return false;
+	}
 
 	// A sanity range, not a mode list: what the display driver actually accepts
 	// is checked by the driver itself.

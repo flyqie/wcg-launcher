@@ -66,21 +66,58 @@ namespace
 		}
 	}
 
+	// Wheel events use transient bits in the pointer mask. They must not be coalesced,
+	// because two identical wheel masks can represent two separate notches.
+	const int PointerWheelBits = 0x08 | 0x10 | 0x20 | 0x40;
+
 	void Post(const Action& Pending)
 	{
 		{
 			lock_guard<mutex> Lock(gPendingLock);
 
-			if (gPending.Count == MaxPending)
+			// Motion can arrive much faster than the desktop can apply it. When there is
+			// no button transition or wheel event between two pointer actions, only the
+			// newest position matters. Keep transitions as separate actions so dragging
+			// and button state remain lossless.
+			if (Pending.What == Action::Pointer && gPending.Count)
 			{
-				// Full. Drop the oldest rather than the newest: the newest is what the
-				// viewer just did, and the oldest is what they have already moved past.
-				gPending.Tail = (gPending.Tail + 1) % MaxPending;
-				--gPending.Count;
-			}
+				Action& Last = gPending.Items[(gPending.Tail + gPending.Count - 1) % MaxPending];
 
-			gPending.Items[(gPending.Tail + gPending.Count) % MaxPending] = Pending;
-			++gPending.Count;
+				if (Last.What == Action::Pointer
+					&& Last.ButtonMask == Pending.ButtonMask
+					&& !(Last.ButtonMask & PointerWheelBits)
+					&& !(Pending.ButtonMask & PointerWheelBits))
+				{
+					Last.X = Pending.X;
+					Last.Y = Pending.Y;
+				}
+				else
+				{
+					if (gPending.Count == MaxPending)
+					{
+						// Full. Drop the oldest rather than the newest: the newest is what the
+						// viewer just did, and the oldest is what they have already moved past.
+						gPending.Tail = (gPending.Tail + 1) % MaxPending;
+						--gPending.Count;
+					}
+
+					gPending.Items[(gPending.Tail + gPending.Count) % MaxPending] = Pending;
+					++gPending.Count;
+				}
+			}
+			else
+			{
+				if (gPending.Count == MaxPending)
+				{
+					// Full. Drop the oldest rather than the newest: the newest is what the
+					// viewer just did, and the oldest is what they have already moved past.
+					gPending.Tail = (gPending.Tail + 1) % MaxPending;
+					--gPending.Count;
+				}
+
+				gPending.Items[(gPending.Tail + gPending.Count) % MaxPending] = Pending;
+				++gPending.Count;
+			}
 		}
 
 		Wake();
