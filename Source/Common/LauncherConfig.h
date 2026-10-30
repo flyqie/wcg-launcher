@@ -1,5 +1,8 @@
 #pragma once
 
-// Default RFB port, overridden at runtime by LAUNCHER_VNC_PORT. 5900 is VNC display :0,
-// which is what a viewer assumes when it is given a bare address. See LauncherEnv.h.
 #define LAUNCHER_VNC_PORT 5900
+
+#define LAUNCHER_FPS 30
+
+#define LAUNCHER_FPS_MIN 1
+#define LAUNCHER_FPS_MAX 240

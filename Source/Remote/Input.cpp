@@ -4,27 +4,16 @@
 #include "../Dock.h"
 #include "Handover.h"
 
-using namespace std;
-
 namespace
 {
-	// --- state, all of it the frame loop's ----------------------------------
 
-	// Where the viewer's pointer last was, in frame coordinates, and whether that was over
-	// the dock. The wheel needs the position: an RFB wheel event carries only a change in
-	// the button mask.
 	int gPointerX = 0;
 	int gPointerY = 0;
 	bool gPointerOnDock = false;
 
-	// The buttons the viewer is holding, as the RFB mask, and whether the dock swallowed
-	// the press that is currently down.
 	int gButtonMask = 0;
 	bool gDockPress = false;
 
-	// Modifiers, as the bits VkKeyScanW reports: 1 Shift, 2 Control, 4 Alt. gHeld is what
-	// the viewer is holding; gTyped is what was pressed here to type a character the
-	// viewer asked for without holding the modifier itself, released on key-up.
 	int gHeld = 0;
 	int gTyped = 0;
 	bool gKeysDown[256] = {};
@@ -35,11 +24,6 @@ namespace
 		gKeysDown[VirtualKey] = bDown;
 	}
 
-	// --- the keyboard -------------------------------------------------------
-
-	// X11 keysyms that are not characters, and the virtual key each one is. Only these
-	// need a table: character keysyms go through VkKeyScanW, which is what makes the
-	// mapping follow the container's keyboard layout rather than ours.
 	struct KeySymEntry
 	{
 		unsigned long KeySym;
@@ -48,32 +32,32 @@ namespace
 
 	const KeySymEntry gKeySyms[] =
 	{
-		{ 0xFF08, VK_BACK },        // BackSpace
-		{ 0xFF09, VK_TAB },         // Tab
-		{ 0xFF0D, VK_RETURN },      // Return
-		{ 0xFF13, VK_PAUSE },       // Pause
-		{ 0xFF14, VK_SCROLL },      // Scroll_Lock
-		{ 0xFF1B, VK_ESCAPE },      // Escape
-		{ 0xFF50, VK_HOME },        // Home
-		{ 0xFF51, VK_LEFT },        // Left
-		{ 0xFF52, VK_UP },          // Up
-		{ 0xFF53, VK_RIGHT },       // Right
-		{ 0xFF54, VK_DOWN },        // Down
-		{ 0xFF55, VK_PRIOR },       // Prior, Page Up
-		{ 0xFF56, VK_NEXT },        // Next, Page Down
-		{ 0xFF57, VK_END },         // End
-		{ 0xFF61, VK_SNAPSHOT },    // Print
-		{ 0xFF63, VK_INSERT },      // Insert
-		{ 0xFF67, VK_APPS },        // Menu
-		{ 0xFF7F, VK_NUMLOCK },     // Num_Lock
-		{ 0xFF8D, VK_RETURN },      // KP_Enter
-		{ 0xFFAA, VK_MULTIPLY },    // KP_Multiply
-		{ 0xFFAB, VK_ADD },         // KP_Add
-		{ 0xFFAC, VK_SEPARATOR },   // KP_Separator
-		{ 0xFFAD, VK_SUBTRACT },    // KP_Subtract
-		{ 0xFFAE, VK_DECIMAL },     // KP_Decimal
-		{ 0xFFAF, VK_DIVIDE },      // KP_Divide
-		{ 0xFFBE, VK_F1 },          // F1
+		{ 0xFF08, VK_BACK },
+		{ 0xFF09, VK_TAB },
+		{ 0xFF0D, VK_RETURN },
+		{ 0xFF13, VK_PAUSE },
+		{ 0xFF14, VK_SCROLL },
+		{ 0xFF1B, VK_ESCAPE },
+		{ 0xFF50, VK_HOME },
+		{ 0xFF51, VK_LEFT },
+		{ 0xFF52, VK_UP },
+		{ 0xFF53, VK_RIGHT },
+		{ 0xFF54, VK_DOWN },
+		{ 0xFF55, VK_PRIOR },
+		{ 0xFF56, VK_NEXT },
+		{ 0xFF57, VK_END },
+		{ 0xFF61, VK_SNAPSHOT },
+		{ 0xFF63, VK_INSERT },
+		{ 0xFF67, VK_APPS },
+		{ 0xFF7F, VK_NUMLOCK },
+		{ 0xFF8D, VK_RETURN },
+		{ 0xFFAA, VK_MULTIPLY },
+		{ 0xFFAB, VK_ADD },
+		{ 0xFFAC, VK_SEPARATOR },
+		{ 0xFFAD, VK_SUBTRACT },
+		{ 0xFFAE, VK_DECIMAL },
+		{ 0xFFAF, VK_DIVIDE },
+		{ 0xFFBE, VK_F1 },
 		{ 0xFFBF, VK_F2 },
 		{ 0xFFC0, VK_F3 },
 		{ 0xFFC1, VK_F4 },
@@ -85,27 +69,23 @@ namespace
 		{ 0xFFC7, VK_F10 },
 		{ 0xFFC8, VK_F11 },
 		{ 0xFFC9, VK_F12 },
-		{ 0xFFE1, VK_SHIFT },       // Shift_L
-		{ 0xFFE2, VK_SHIFT },       // Shift_R
-		{ 0xFFE3, VK_CONTROL },     // Control_L
-		{ 0xFFE4, VK_CONTROL },     // Control_R
-		{ 0xFFE5, VK_CAPITAL },     // Caps_Lock
-		{ 0xFFE7, VK_LWIN },        // Meta_L
-		{ 0xFFE8, VK_RWIN },        // Meta_R
-		{ 0xFFE9, VK_MENU },        // Alt_L
-		{ 0xFFEA, VK_MENU },        // Alt_R
-		{ 0xFFEB, VK_LWIN },        // Super_L
-		{ 0xFFEC, VK_RWIN },        // Super_R
-		{ 0xFE03, VK_RMENU },       // ISO_Level3_Shift, AltGr
-		{ 0xFFFF, VK_DELETE },      // Delete
+		{ 0xFFE1, VK_SHIFT },
+		{ 0xFFE2, VK_SHIFT },
+		{ 0xFFE3, VK_CONTROL },
+		{ 0xFFE4, VK_CONTROL },
+		{ 0xFFE5, VK_CAPITAL },
+		{ 0xFFE7, VK_LWIN },
+		{ 0xFFE8, VK_RWIN },
+		{ 0xFFE9, VK_MENU },
+		{ 0xFFEA, VK_MENU },
+		{ 0xFFEB, VK_LWIN },
+		{ 0xFFEC, VK_RWIN },
+		{ 0xFE03, VK_RMENU },
+		{ 0xFFFF, VK_DELETE },
 	};
 
-	// Resolves a keysym to a virtual key and the modifiers its key needs. False for a
-	// keysym that is not a key on this layout -- a dead key, a character the container's
-	// keyboard cannot produce -- for which nothing is injected.
 	bool ResolveKeySym(unsigned long KeySym, int& VirtualKey, int& Modifiers)
 	{
-		// Keypad digits, which are one contiguous run in both encodings.
 		if (KeySym >= 0xFFB0 && KeySym <= 0xFFB9)
 		{
 			VirtualKey = VK_NUMPAD0 + (int)(KeySym - 0xFFB0);
@@ -130,8 +110,6 @@ namespace
 			return false;
 		}
 
-		// A character. VkKeyScanW answers with the virtual key and the modifiers its key
-		// needs on this layout, which is the pair wanted here.
 		const SHORT Result = VkKeyScanW((WCHAR)KeySym);
 
 		if (Result == -1)
@@ -145,7 +123,6 @@ namespace
 		return true;
 	}
 
-	// Presses or releases one modifier key.
 	void SetModifier(int Bit, bool bDown)
 	{
 		const int VirtualKey = (Bit == 1) ? VK_SHIFT : (Bit == 2) ? VK_CONTROL : VK_MENU;
@@ -154,13 +131,6 @@ namespace
 	}
 }
 
-// Types one key event into the container. The frame loop's.
-//
-// RFB carries characters, not keys: Shift+A in a viewer sends the keysym for "A" and a
-// viewer may never send Shift itself. Mapping that keysym to a key and injecting it on
-// its own would type a lowercase "a", so a character whose key needs a modifier is
-// typed by pressing that modifier here and releasing it again, unless the viewer is
-// already holding it.
 void Input::ApplyKey(unsigned long KeySym, bool bDown)
 {
 	int VirtualKey = 0;
@@ -171,8 +141,6 @@ void Input::ApplyKey(unsigned long KeySym, bool bDown)
 		return;
 	}
 
-	// A modifier the viewer sent itself is never pressed twice: the second press would be
-	// undone by the first release and the rest of the typing would come out unmodified.
 	switch (VirtualKey)
 	{
 	case VK_SHIFT:   gHeld = bDown ? (gHeld | 1) : (gHeld & ~1); break;
@@ -189,8 +157,6 @@ void Input::ApplyKey(unsigned long KeySym, bool bDown)
 		if (Needed & 2) { SetModifier(2, true); }
 		if (Needed & 4) { SetModifier(4, true); }
 
-		// Accumulated rather than assigned, so a press arriving before the previous key was
-		// released does not lose the record of a modifier that is down.
 		gTyped |= Needed;
 	}
 
@@ -198,9 +164,6 @@ void Input::ApplyKey(unsigned long KeySym, bool bDown)
 
 	if (!bDown && gTyped)
 	{
-		// Released on the first key-up of any kind, which can be early if two keys are held
-		// at once. Early is the right way to be wrong: a modifier left down sticks, and
-		// everything typed afterwards is wrong until the viewer sends it again.
 		if (gTyped & 1) { SetModifier(1, false); }
 		if (gTyped & 2) { SetModifier(2, false); }
 		if (gTyped & 4) { SetModifier(4, false); }
@@ -209,14 +172,12 @@ void Input::ApplyKey(unsigned long KeySym, bool bDown)
 	}
 }
 
-// Applies one pointer event: motion, a button, or a wheel notch. The frame loop's.
 void Input::ApplyPointer(rfbScreenInfoPtr Screen, int ButtonMask, int X, int Y)
 {
 	gPointerX = X;
 	gPointerY = Y;
 	gPointerOnDock = Dock::Contains(Y, Screen->height);
 
-	// Buttons 1 to 3: the mask's low bits, which line up with Desktop::PointerButton.
 	for (int Bit = 0; Bit < 3; ++Bit)
 	{
 		const bool bWas = (gButtonMask & (1 << Bit)) != 0;
@@ -229,31 +190,28 @@ void Input::ApplyPointer(rfbScreenInfoPtr Screen, int ButtonMask, int X, int Y)
 
 		const int Button = Bit + 1;
 
-		// The dock is the client's own, so anything landing on it is handled here and never
-		// reaches the container. Left button only; the others do nothing down there.
 		if (gPointerOnDock)
 		{
-			if (Button != 1)
+			if (Button == 1)
 			{
-				continue;
-			}
+				if (bNow)
+				{
+					gDockPress = true;
 
-			if (bNow)
-			{
-				gDockPress = true;
-
-				Dock::Press(X, Y, Screen->width, Screen->height);
+					Dock::Press(X, Y, Screen->width, Screen->height);
+				}
+				else if (gDockPress)
+				{
+					gDockPress = false;
+				}
+				else
+				{
+					Desktop::PointerButton(1, false);
+				}
 			}
-			else if (gDockPress)
+			else if (Button == 2 && bNow)
 			{
-				gDockPress = false;
-			}
-			else
-			{
-				// Pressed on the desktop, released over the dock -- dragging a window past
-				// the bottom edge does this. The container is still holding the button down,
-				// so the release has to reach it or the drag never ends.
-				Desktop::PointerButton(1, false);
+				Dock::Close(X, Y, Screen->width, Screen->height);
 			}
 
 			continue;
@@ -262,10 +220,6 @@ void Input::ApplyPointer(rfbScreenInfoPtr Screen, int ButtonMask, int X, int Y)
 		Desktop::PointerButton(Button, bNow);
 	}
 
-	// The wheel: four more bits of the same mask, each set for one event and cleared by
-	// the next. One notch is WHEEL_DELTA, and the sign is RFB's -- up and right positive,
-	// which is the way Desktop::Wheel counts. Nothing in the dock scrolls, so a scroll
-	// down there is dropped.
 	const int WheelBits = 0x08 | 0x10 | 0x20 | 0x40;
 	const int Pressed = ButtonMask & ~gButtonMask & WheelBits;
 
@@ -274,16 +228,14 @@ void Input::ApplyPointer(rfbScreenInfoPtr Screen, int ButtonMask, int X, int Y)
 		int Delta = 0;
 		int HDelta = 0;
 
-		if (Pressed & 0x08) { Delta += WHEEL_DELTA; }    // button 4, up
-		if (Pressed & 0x10) { Delta -= WHEEL_DELTA; }    // button 5, down
-		if (Pressed & 0x20) { HDelta -= WHEEL_DELTA; }   // button 6, left
-		if (Pressed & 0x40) { HDelta += WHEEL_DELTA; }   // button 7, right
+		if (Pressed & 0x08) { Delta += WHEEL_DELTA; }
+		if (Pressed & 0x10) { Delta -= WHEEL_DELTA; }
+		if (Pressed & 0x20) { HDelta -= WHEEL_DELTA; }
+		if (Pressed & 0x40) { HDelta += WHEEL_DELTA; }
 
 		Desktop::Wheel(X, Y, Delta, HDelta);
 	}
 
-	// Not while over the dock: moving the container's cursor down there would put it
-	// behind the dock and leave it there.
 	if (!gPointerOnDock)
 	{
 		Desktop::PointerMove(X, Y);
@@ -316,7 +268,6 @@ void Input::PointerPosition(int& X, int& Y)
 	Y = gPointerY;
 }
 
-// libvncserver's keyboard callback.
 void Input::OnKeyboard(rfbBool bDown, rfbKeySym KeySym, rfbClientPtr cl)
 {
 	(void)cl;
@@ -324,13 +275,6 @@ void Input::OnKeyboard(rfbBool bDown, rfbKeySym KeySym, rfbClientPtr cl)
 	Handover::PostKey((unsigned long)KeySym, bDown != 0);
 }
 
-// libvncserver's pointer callback.
-//
-// rfbDefaultPtrAddEvent is libvncserver's own bookkeeping -- it records where the
-// pointer is so the cursor position can be sent on -- and doing it here rather than a
-// frame later is what makes the cursor a viewer draws follow its own mouse with no
-// added latency. The container's cursor is a frame behind; the one under the user's
-// hand is not.
 void Input::OnPointer(int ButtonMask, int X, int Y, rfbClientPtr cl)
 {
 	rfbDefaultPtrAddEvent(ButtonMask, X, Y, cl);

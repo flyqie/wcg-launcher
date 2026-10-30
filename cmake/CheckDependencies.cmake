@@ -1,13 +1,3 @@
-# Verifies that an executable depends on nothing but the DLLs that come with Windows.
-#
-# Run after linking, in script mode:
-#
-#     cmake -DEXE=<the exe> -DLINKER=<link.exe> -P cmake/CheckDependencies.cmake
-#
-# The container-side program has to be one file, and that is a property of the link
-# that is lost silently: a DLL build of zlib reaching the link is all it takes, and
-# nothing about the build says so until the container refuses to start. `link /dump
-# /dependents` is dumpbin's import table without needing dumpbin on PATH.
 
 if(NOT EXISTS "${EXE}")
 	message(FATAL_ERROR "CheckDependencies: no such file: ${EXE}")
@@ -27,7 +17,6 @@ if(NOT _result EQUAL 0)
 	message(FATAL_ERROR "CheckDependencies: link /dump failed on ${EXE}:\n${_error}")
 endif()
 
-# System32 rather than a list of names, which would be wrong on the next Windows.
 if(EXISTS "$ENV{SystemRoot}/System32")
 	set(_system "$ENV{SystemRoot}/System32")
 else()
@@ -58,5 +47,25 @@ if(_foreign)
 
 	message(FATAL_ERROR
 		"${EXE} depends on DLLs that are not part of Windows:\n    ${_list}\n"
-		"The container-side program has to be one file, so this build cannot be deployed. Either link that library statically -- deps/ carries both compression libraries as submodules and builds them that way, see cmake/Dependencies.cmake -- or configure with -DLAUNCHER_VNC_PURE=ON and use the encodings libvncserver carries itself. Docs/BUILD.md, section 2.")
+		"Link it statically, or configure with -DLAUNCHER_VNC_PURE=ON.")
+endif()
+
+execute_process(
+	COMMAND "${LINKER}" /dump /headers "${EXE}"
+	OUTPUT_VARIABLE _headers
+	ERROR_VARIABLE _header_error
+	RESULT_VARIABLE _header_result)
+
+if(NOT _header_result EQUAL 0)
+	message(FATAL_ERROR "CheckDependencies: link /dump /headers failed on ${EXE}:\n${_header_error}")
+endif()
+
+string(REPLACE "\r\n" "\n" _headers "${_headers}")
+
+if(_headers MATCHES "[ \t]+([0-9]+) \\[[ \t]*[0-9]+\\] RVA \\[size\\] of Delay Import Directory")
+	if(NOT CMAKE_MATCH_1 EQUAL 0)
+		message(FATAL_ERROR
+			"${EXE} has a delay-load import table (RVA ${CMAKE_MATCH_1}).\n"
+			"Those DLLs are invisible to the check above. Stop delay-loading them.")
+	endif()
 endif()

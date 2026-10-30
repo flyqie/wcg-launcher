@@ -1,6 +1,7 @@
 # Build output
 /Output
 /build
+/build-pure
 /Binaries
 
 # vcpkg's manifest-mode install directory, when the build directory is not used
@@ -9,3 +10,7 @@
 # Per-machine editor and assistant state, which holds local paths
 /.vs
 /.claude
+
+/Docs
+/TODO.md
+/Snipaste_*

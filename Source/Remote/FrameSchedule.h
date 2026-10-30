@@ -2,7 +2,6 @@
 
 #include <Windows.h>
 
-// Capture deadlines are independent of how often input wakes the loop.
 namespace FrameSchedule
 {
 	inline void OnInput(ULONGLONG Now, ULONGLONG LastFrame, DWORD Interval,

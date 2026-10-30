@@ -3,25 +3,13 @@
 #include <Windows.h>
 
 #include <iostream>
+#include <string.h>
 #include <vector>
 
 #include "Common/LauncherLog.h"
 
-using namespace std;
-
-// The capture half of the desktop: one pass over every window, painted into a single
-// bitmap.
-//
-// WM_PRINT is the only way to get pixels in a container. There is no DWM, so there is no
-// composited screen surface for BitBlt to read from a window's DC, and no D3D device can
-// be created instead -- the container has no adapter and, on the older image, no WARP
-// either. See Docs/IMAGE-ANALYSIS.md.
-//
-// Nothing here knows about the dock or about the viewer.
-
 namespace
 {
-	// Restores selected objects before deleting a DC, including on capture failure.
 	struct MemoryDc
 	{
 		HDC Dc;
@@ -54,61 +42,40 @@ namespace
 		~ScreenDc() { if (Dc) { ReleaseDC(NULL, Dc); } }
 	};
 
-	// Windows' WM_PRINT reaches children through its PRF_CHILDREN pass, and that
-	// pass does not reliably draw themed common controls -- a status bar comes out
-	// with its background but no parts. Every visible descendant is therefore
-	// re-printed explicitly on top.
 	typedef struct {
 		int ScreenWidth;
 		int ScreenHeight;
 		HDC hdcMemory;
 
-		// The scratch DC every window is painted into: one for the whole capture rather
-		// than one per window, since GetDCEx on another process's window and
-		// CreateCompatibleDC are both real costs.
 		HDC hdcScratch;
+
 	} EnumWindowParam;
 
-	// One scratch bitmap, shared by every window and every frame, used to paint a
-	// single window before it is copied into the target.
 	HBITMAP ghTempBitmap = NULL;
+	unsigned char* gTempBitmapBits = NULL;
 	int gTempBitmapWidth = 0;
 	int gTempBitmapHeight = 0;
+	int gTempBitmapStride = 0;
 
-	// The full-screen target, kept across frames. A DIB section rather than a
-	// CreateCompatibleBitmap, because its bits are directly addressable: the frame can be
-	// compared against the previous one and copied into the RFB framebuffer without the
-	// two full-screen copies a device-dependent bitmap would need -- measured, 2.4-3.7 ms
-	// of an 8.6 ms idle frame. Reused until the screen size changes.
 	HBITMAP gTargetBitmap = NULL;
 	void* gTargetBits = NULL;
 	int gTargetWidth = 0;
 	int gTargetHeight = 0;
 
-	// PrintWindow() calls made since the last Capture reset.
 	unsigned gPrintWindowCalls = 0;
 
-	// The desktop this thread is on, which is the container's. Fetched once; it does not
-	// change for the life of the process.
 	HDESK gDesktop = NULL;
 
-	// Off unless LAUNCHER_DEBUG is set, in which case nothing below reads the clock.
-	//
-	// Measured, a QueryPerformanceCounter pair plus the conversion costs 31.7 ns, and a
-	// frame takes 9 + (one per window) of them -- about 0.3 us idle, or 0.003% of a 33 ms
-	// frame. Not a real cost; gated because there is no reason for it not to be.
 	const bool gProfile = DebugEnabled();
 
 	Desktop::CaptureBreakdown gBreakdown = { 0 };
 	LARGE_INTEGER gQpcFrequency = { 0 };
 
-	// The two halves of the window pass, folded into gBreakdown when it ends.
 	ULONGLONG gTopLevelPrintUs = 0;
 	ULONGLONG gChildReprintUs = 0;
 	unsigned gTopLevelCalls = 0;
 	unsigned gChildCalls = 0;
 
-	// Starts a timer, or leaves it zero when profiling is off.
 	void Begin(LARGE_INTEGER& Start)
 	{
 		if (gProfile)
@@ -117,7 +84,6 @@ namespace
 		}
 	}
 
-	// Microseconds since Begin, or 0 when profiling is off.
 	ULONGLONG Since(const LARGE_INTEGER& Start)
 	{
 		if (!gProfile)
@@ -131,11 +97,6 @@ namespace
 		return (ULONGLONG)((Now.QuadPart - Start.QuadPart) * 1000000LL / gQpcFrequency.QuadPart);
 	}
 
-	// Paints hwnd into hdc and counts the call.
-	//
-	// Sending WM_PRINT directly instead, to avoid the PRF_CHILDREN recursion, was tried
-	// and does not work: an HDC is only meaningful in the calling process, so the frame
-	// came back empty. See Docs/PERFORMANCE.md, experiment B.
 	void PaintWindow(HWND hwnd, HDC hdc)
 	{
 		PrintWindow(hwnd, hdc, 0);
@@ -143,11 +104,129 @@ namespace
 		++gPrintWindowCalls;
 	}
 
-	// Re-prints every descendant of hwnd into hdc. See the note on EnumWindowParam.
-	//
-	// GetWindow(GW_CHILD)/GW_HWNDNEXT walks from the topmost child down, so the children
-	// are iterated in reverse to leave the topmost painted last. OriginX/OriginY are the
-	// screen coordinates of hdc's origin.
+	struct ControlPixels
+	{
+		HWND Window = NULL;
+		int Width = 0;
+		int Height = 0;
+		bool bUniform = true;
+		unsigned long long LastSeen = 0;
+		std::vector<unsigned char> Pixels;
+	};
+
+	std::vector<ControlPixels> gControlCache;
+
+	unsigned long long gFrameCounter = 0;
+
+	unsigned gChildRepairs = 0;
+
+	bool IsUniform(const unsigned char* Pixels, int Width, int Height)
+	{
+		if (Width <= 0 || Height <= 0)
+		{
+			return true;
+		}
+
+		for (int y = 0; y < Height; ++y)
+		{
+			const unsigned char* Row = Pixels + (size_t)y * Width * 4;
+
+			for (int x = 0; x < Width; ++x)
+			{
+				const unsigned char* Pixel = Row + (size_t)x * 4;
+
+				if (Pixel[0] != Pixels[0] || Pixel[1] != Pixels[1] || Pixel[2] != Pixels[2])
+				{
+					return false;
+				}
+			}
+		}
+
+		return true;
+	}
+
+	void RepairChild(HWND Window, int X, int Y, int Width, int Height)
+	{
+		if (!gTempBitmapBits)
+		{
+			return;
+		}
+
+		int Left = X;
+		int Top = Y;
+		int Right = X + Width;
+		int Bottom = Y + Height;
+
+		if (Left < 0) { Left = 0; }
+		if (Top < 0) { Top = 0; }
+		if (Right > gTempBitmapWidth) { Right = gTempBitmapWidth; }
+		if (Bottom > gTempBitmapHeight) { Bottom = gTempBitmapHeight; }
+
+		const int W = Right - Left;
+		const int H = Bottom - Top;
+
+		if (W <= 0 || H <= 0)
+		{
+			return;
+		}
+
+		GdiFlush();
+
+		ControlPixels* Entry = NULL;
+
+		for (ControlPixels& Candidate : gControlCache)
+		{
+			if (Candidate.Window == Window)
+			{
+				Entry = &Candidate;
+				break;
+			}
+		}
+
+		if (!Entry)
+		{
+			gControlCache.push_back(ControlPixels());
+			Entry = &gControlCache.back();
+
+			Entry->Window = Window;
+		}
+
+		Entry->LastSeen = gFrameCounter;
+
+		if (Entry->Width != W || Entry->Height != H)
+		{
+			Entry->Width = W;
+			Entry->Height = H;
+			Entry->Pixels.clear();
+			Entry->bUniform = true;
+		}
+
+		std::vector<unsigned char> Fresh((size_t)W * H * 4);
+
+		for (int y = 0; y < H; ++y)
+		{
+			memcpy(&Fresh[(size_t)y * W * 4],
+				gTempBitmapBits + (size_t)(Top + y) * gTempBitmapStride + (size_t)Left * 4,
+				(size_t)W * 4);
+		}
+
+		const bool bFreshUniform = IsUniform(Fresh.data(), W, H);
+
+		if (bFreshUniform && !Entry->bUniform && Entry->Pixels.size() == Fresh.size())
+		{
+			for (int y = 0; y < H; ++y)
+			{
+				memcpy(gTempBitmapBits + (size_t)(Top + y) * gTempBitmapStride + (size_t)Left * 4,
+					&Entry->Pixels[(size_t)y * W * 4], (size_t)W * 4);
+			}
+
+			++gChildRepairs;
+		}
+
+		Entry->Pixels.swap(Fresh);
+		Entry->bUniform = bFreshUniform;
+	}
+
 	void PrintWindowTree(HWND hwnd, HDC hdc, int OriginX, int OriginY)
 	{
 		std::vector<HWND> Children;
@@ -178,6 +257,9 @@ namespace
 
 			gChildReprintUs += Since(PrintStart);
 
+			RepairChild(*it, r.left - OriginX, r.top - OriginY,
+				r.right - r.left, r.bottom - r.top);
+
 			PrintWindowTree(*it, hdc, OriginX, OriginY);
 
 			SetViewportOrgEx(hdc, OldOrigin.x, OldOrigin.y, NULL);
@@ -195,8 +277,6 @@ namespace
 			return TRUE;
 		}
 
-		// A minimized window has no pixels to paint, and it is not lost by being
-		// skipped: the dock keeps a button for it. See Dock.h.
 		if (!(WindowInfo.dwStyle & WS_VISIBLE) || IsIconic(hwnd))
 		{
 			return TRUE;
@@ -205,22 +285,9 @@ namespace
 		RECT r;
 		if (!GetWindowRect(hwnd, &r)) { return TRUE; }
 
-		// Where the window's rect starts, which is not where it is drawn.
-		//
-		// A maximized window's rect runs past the screen by the width of the
-		// invisible resize border Windows gives it, so GetWindowRect returns a
-		// rect larger than the display -- (-8, -8, 1032, 750) for a 1024x768
-		// screen. That is what the descendants below are positioned against, so
-		// it is kept.
 		const int OriginX = r.left;
 		const int OriginY = r.top;
 
-		// What is actually drawn has to be clamped to the screen.
-		//
-		// BitBlt clips its destination, so a window drawn at a negative origin
-		// loses the matching strip at the far edge: the copy runs off the target
-		// and the last few columns are never written, leaving bare desktop where
-		// the window's right edge should be. It is the same at the bottom.
 		int Left = r.left;
 		int Top = r.top;
 		int Right = r.right;
@@ -243,13 +310,6 @@ namespace
 
 		HDC hdcWindowMemory = Param->hdcScratch;
 
-		// ghTempBitmap is shared by every window and every frame, and no capture
-		// pass is obliged to paint all of it. Fill with the desktop colour first
-		// so anything left unpainted blends into the background instead of
-		// showing the previously captured window's pixels.
-		//
-		// Only the part that will be copied out, which starts where the window's
-		// rect does rather than at the scratch's own corner.
 		const int SrcX = x - OriginX;
 		const int SrcY = y - OriginY;
 
@@ -279,8 +339,6 @@ namespace
 		return TRUE;
 	}
 
-	// Returns the full-screen DIB, rebuilding it only when the size changes, and
-	// hands back a pointer to its bits.
 	HBITMAP EnsureTargetBitmap(HDC hdcSource, int Width, int Height, void** Bits)
 	{
 		if (gTargetBitmap && gTargetWidth == Width && gTargetHeight == Height)
@@ -299,7 +357,7 @@ namespace
 		BITMAPINFO Info = { 0 };
 		Info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 		Info.bmiHeader.biWidth = Width;
-		Info.bmiHeader.biHeight = -Height;   // top-down, so the bits start at the top row
+		Info.bmiHeader.biHeight = -Height;
 		Info.bmiHeader.biPlanes = 1;
 		Info.bmiHeader.biBitCount = 32;
 		Info.bmiHeader.biCompression = BI_RGB;
@@ -321,12 +379,14 @@ namespace
 
 bool Desktop::Capture(Frame& Out)
 {
-	// Reset on entry so the caller can read this frame's count once we return.
 	gPrintWindowCalls = 0;
 	gTopLevelPrintUs = 0;
 	gChildReprintUs = 0;
 	gTopLevelCalls = 0;
 	gChildCalls = 0;
+	gChildRepairs = 0;
+
+	++gFrameCounter;
 
 	if (gProfile && !gQpcFrequency.QuadPart)
 	{
@@ -341,7 +401,7 @@ bool Desktop::Capture(Frame& Out)
 
 	if (!hdcSource)
 	{
-		Debug() << "DC could not be retrieved" << endl;
+		Debug() << "DC could not be retrieved" << std::endl;
 		return false;
 	}
 
@@ -354,17 +414,6 @@ bool Desktop::Capture(Frame& Out)
 	HDC hdcMemory = Target.Dc;
 	if (!hdcMemory) { return false; }
 
-	// One scratch bitmap shared by every window and every frame, so it is not
-	// reallocated per window. Rebuilt only when the screen size changes, which it
-	// can: see LAUNCHER_RESOLUTION.
-	//
-	// Bigger than the screen by the widest resize border the system hands out,
-	// and it has to be. A maximized window's rect runs past the screen by that
-	// much on every side, and PrintWindow paints the window into the DC by its
-	// rect, so the part that is actually on screen starts at the border offset
-	// rather than at the DC's corner. A scratch the size of the screen clips the
-	// far edge away before the copy out, which is what left a strip of bare
-	// desktop down the right of a maximized window.
 	const int Border = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
 	const int ScratchWidth = capX + Border * 2;
 	const int ScratchHeight = capY + Border * 2;
@@ -374,16 +423,31 @@ bool Desktop::Capture(Frame& Out)
 		if (ghTempBitmap)
 		{
 			DeleteObject(ghTempBitmap);
+			ghTempBitmap = NULL;
+			gTempBitmapBits = NULL;
 		}
 
-		ghTempBitmap = CreateCompatibleBitmap(hdcSource, ScratchWidth, ScratchHeight);
+		BITMAPINFO Info = { 0 };
+		Info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		Info.bmiHeader.biWidth = ScratchWidth;
+		Info.bmiHeader.biHeight = -ScratchHeight;
+		Info.bmiHeader.biPlanes = 1;
+		Info.bmiHeader.biBitCount = 32;
+		Info.bmiHeader.biCompression = BI_RGB;
+
+		ghTempBitmap = CreateDIBSection(hdcSource, &Info, DIB_RGB_COLORS,
+			(void**)&gTempBitmapBits, NULL, 0);
+
+		if (!ghTempBitmap)
+		{
+			return false;
+		}
+
 		gTempBitmapWidth = ScratchWidth;
 		gTempBitmapHeight = ScratchHeight;
+		gTempBitmapStride = ScratchWidth * 4;
 	}
 
-	// The DC the scratch bitmap lives in, for the whole capture. Created after the
-	// bitmap so that the one select below is the only one needed, and released at the
-	// end of Capture.
 	MemoryDc ScratchDc(hdcSource);
 	HDC hdcScratch = ScratchDc.Dc;
 
@@ -411,11 +475,6 @@ bool Desktop::Capture(Frame& Out)
 	EnumParam.hdcMemory = hdcMemory;
 	EnumParam.hdcScratch = hdcScratch;
 
-	// Fill background with the desktop color.
-	//
-	// FillRect covers the whole DC, so the Rectangle() that used to precede it --
-	// which filled the same area with the DC's default white brush -- was
-	// overwritten in full and only bought a second full-screen pass.
 	LARGE_INTEGER FillStart;
 	Begin(FillStart);
 
@@ -429,8 +488,6 @@ bool Desktop::Capture(Frame& Out)
 	LARGE_INTEGER PassStart;
 	Begin(PassStart);
 
-	// Gather the windows first, so they can be drawn in reverse order --
-	// otherwise the back windows appear first.
 	if (!gDesktop)
 	{
 		gDesktop = GetThreadDesktop(GetCurrentThreadId());
@@ -438,9 +495,44 @@ bool Desktop::Capture(Frame& Out)
 
 	EnumDesktopWindows(gDesktop, CollectProc, (LPARAM)&hwndList);
 
+	if (gProfile)
+	{
+		for (HWND hwnd : hwndList)
+		{
+			WCHAR Class[128] = { 0 };
+			WCHAR Title[128] = { 0 };
+			RECT Bounds = { 0 };
+
+			GetClassNameW(hwnd, Class, 128);
+			GetWindowTextW(hwnd, Title, 128);
+			GetWindowRect(hwnd, &Bounds);
+
+			DebugW() << L"  window " << Class << L"  \"" << Title << L"\"  "
+			         << (Bounds.right - Bounds.left) << L"x" << (Bounds.bottom - Bounds.top)
+			         << (IsWindowVisible(hwnd) ? L" visible" : L" hidden")
+			         << (IsIconic(hwnd) ? L" iconic" : L"")
+			         << std::endl;
+
+		}
+	}
+
 	for (std::vector<HWND>::reverse_iterator rit = hwndList.rbegin(); rit != hwndList.rend(); rit++)
 	{
 		EnumWindowsProc(*rit, (LPARAM)&EnumParam);
+	}
+
+	{
+		std::vector<ControlPixels> Live;
+
+		for (ControlPixels& Entry : gControlCache)
+		{
+			if (Entry.LastSeen == gFrameCounter)
+			{
+				Live.push_back(std::move(Entry));
+			}
+		}
+
+		gControlCache.swap(Live);
 	}
 
 	gBreakdown.WindowPass = Since(PassStart);
@@ -448,8 +540,8 @@ bool Desktop::Capture(Frame& Out)
 	gBreakdown.ChildReprint = gChildReprintUs;
 	gBreakdown.TopLevelCalls = gTopLevelCalls;
 	gBreakdown.ChildCalls = gChildCalls;
+	gBreakdown.ChildRepairs = gChildRepairs;
 
-	// Transfer the target DC to the caller; the scratch and screen DCs stay scoped.
 	Out.Dc = hdcMemory;
 	Out.Previous = Target.Previous;
 	Target.Dc = NULL;
@@ -465,12 +557,8 @@ bool Desktop::Capture(Frame& Out)
 
 void Desktop::Finish(const Frame& In)
 {
-	// Complete this thread's batched GDI writes (including the dock) before the
-	// framebuffer diff reads the DIB through its CPU pointer.
 	GdiFlush();
 
-	// Deselect before the DC goes away: the bitmap outlives it, and the caller
-	// may still be holding Bits.
 	SelectObject(In.Dc, In.Previous);
 	DeleteDC(In.Dc);
 }

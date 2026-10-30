@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64",
+      "description": "The build Docs/BUILD.md describes. Configuration is chosen at build time.",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "windows-x64-pure",
+      "inherits": "windows-x64",
+      "displayName": "Windows x64, libvncserver alone",
+      "description": "LAUNCHER_VNC_PURE: neither compression library is built, so ZRLE, ZYWRLE and Tight do not exist. For a link that is only ever looked at over loopback.",
+      "binaryDir": "${sourceDir}/build-pure",
+      "cacheVariables": {
+        "LAUNCHER_VNC_PURE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "windows-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "windows-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release-pure",
+      "configurePreset": "windows-x64-pure",
+      "configuration": "Release"
+    }
+  ]
+}

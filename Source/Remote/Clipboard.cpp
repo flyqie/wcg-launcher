@@ -6,12 +6,8 @@
 #include "../Desktop.h"
 #include "Handover.h"
 
-using namespace std;
-
 namespace
 {
-	// The container's clipboard counter as of the last time the viewers were told. See
-	// Publish.
 	unsigned long gSentSequence = 0;
 }
 
@@ -19,28 +15,26 @@ void Clipboard::OnCutText(char* Text, int Length, rfbClientPtr cl)
 {
 	(void)cl;
 
-	// Queued like everything else that has to reach the container. The bytes are whatever
-	// the viewer chose to send -- UTF-8 in practice, Latin-1 by the letter of the protocol
-	// -- and Desktop::SetClipboardText is what tells the two apart.
 	Handover::PostCutText(Text, Length);
 }
 
-void Clipboard::ApplyText(const string& Text)
+void Clipboard::OnCutTextUtf8(char* Text, int Length, rfbClientPtr cl)
+{
+	(void)cl;
+
+	Handover::PostCutText(Text, Length);
+}
+
+void Clipboard::ApplyText(const std::string& Text)
 {
 	if (!Desktop::SetClipboardText(Text))
 	{
-		// Another process is holding the clipboard. Dropped rather than retried: it came
-		// from a viewer that is no longer waiting, and holding it would put a stale paste
-		// on the clipboard a second later.
 		return;
 	}
 
-	// This program is what just changed the clipboard, so the new counter is recorded as
-	// already sent. Otherwise it would be read back and sent to the viewer that sent it,
-	// which would set that viewer's clipboard, which would send it here again.
 	gSentSequence = Desktop::ClipboardSequence();
 
-	Debug() << "Clipboard from a viewer: " << Text.size() << " bytes" << endl;
+	Debug() << "Clipboard from a viewer: " << Text.size() << " bytes" << std::endl;
 }
 
 void Clipboard::Publish(rfbScreenInfoPtr Screen, unsigned Viewers)
@@ -50,9 +44,6 @@ void Clipboard::Publish(rfbScreenInfoPtr Screen, unsigned Viewers)
 		return;
 	}
 
-	// A counter rather than a window and a message loop: GetClipboardSequenceNumber costs
-	// nothing and is the only way to notice a change from a thread that has no message
-	// queue. The clipboard itself is opened only on frames where the counter moved.
 	const unsigned long Sequence = Desktop::ClipboardSequence();
 
 	if (Sequence == gSentSequence)
@@ -60,29 +51,25 @@ void Clipboard::Publish(rfbScreenInfoPtr Screen, unsigned Viewers)
 		return;
 	}
 
-	string Text;
+	std::string Utf8;
+	std::string Latin1;
 
-	if (!Desktop::ReadClipboardText(Text))
+	if (!Desktop::ReadClipboardText(Utf8, Latin1))
 	{
-		// Held by another process, or holding something that is not text. The counter is
-		// left where it is, so this is tried again next frame.
 		return;
 	}
 
 	gSentSequence = Sequence;
 
-	if (Text.empty())
+	if (Utf8.empty())
 	{
 		return;
 	}
 
-	// Sent as the bytes they are, through the plain path. RFB's cut text has no encoding
-	// field, so UTF-8 goes out and the viewer guesses; libvncserver's extended clipboard
-	// says so explicitly but is reached through rfbSendServerCutTextUTF8, which this does
-	// not use. See Docs/BUILD.md, section 4.6.
-	rfbSendServerCutText(Screen, &Text[0], (int)Text.size());
+	rfbSendServerCutTextUTF8(Screen, &Utf8[0], (int)Utf8.size(),
+		Latin1.empty() ? NULL : &Latin1[0], (int)Latin1.size());
 
-	Debug() << "Clipboard to the viewers: " << Text.size() << " bytes" << endl;
+	Debug() << "Clipboard to the viewers: " << Utf8.size() << " bytes" << std::endl;
 }
 
 void Clipboard::Seed()

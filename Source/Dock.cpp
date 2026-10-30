@@ -4,16 +4,15 @@
 
 #include <algorithm>
 #include <iostream>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "Common/LauncherEnv.h"
 #include "Common/LauncherLog.h"
 
-using namespace std;
-
 namespace
 {
-	// Read once: this is asked for on every frame.
 	bool Enabled()
 	{
 		static const bool On = LauncherDock();
@@ -21,28 +20,61 @@ namespace
 		return On;
 	}
 
-	int Height()
+	int StripHeight()
 	{
-		return Enabled() ? LAUNCHER_DOCK_HEIGHT : 0;
+		static const int Value = []
+		{
+			if (!Enabled())
+			{
+				return 0;
+			}
+
+			HDC Screen = GetDC(NULL);
+
+			if (!Screen)
+			{
+				return (int)LAUNCHER_DOCK_HEIGHT;
+			}
+
+			const int Dpi = GetDeviceCaps(Screen, LOGPIXELSY);
+
+			ReleaseDC(NULL, Screen);
+
+			if (Dpi <= 0)
+			{
+				return (int)LAUNCHER_DOCK_HEIGHT;
+			}
+
+			return (int)((LAUNCHER_DOCK_HEIGHT * Dpi + 48) / 96);
+		}();
+
+		return Value;
 	}
 
-	// One button per window, in the order the windows first appeared -- deliberately not
-	// z-order, which changes on every click and would reshuffle buttons under the cursor.
-	// A window is appended when it shows up and dropped when it goes away.
-	std::vector<HWND> gButtons;
+	struct DockButton
+	{
+		HWND Window = NULL;
+		std::wstring Title;
+		unsigned long long ReadAt = 0;
+	};
 
-	const int ButtonWidth = 150;
+	std::vector<DockButton> gButtons;
+
+	unsigned long long gFrameCounter = 0;
+
+	const unsigned long long TitleRefreshFrames = 15;
+
+	const int ButtonWidthMax = 150;
+	const int ButtonWidthMin = 44;
 	const int ButtonGap = 2;
 
 	bool IsDockWindow(HWND hwnd)
 	{
-		if (!IsWindowVisible(hwnd) || GetWindowTextLengthW(hwnd) <= 0)
+		if (!IsWindowVisible(hwnd))
 		{
 			return false;
 		}
 
-		// A taskbar does not list tool windows either. This also keeps the
-		// desktop's own helper windows out of the strip.
 		if (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)
 		{
 			return false;
@@ -63,40 +95,69 @@ namespace
 		return TRUE;
 	}
 
-	// Drops windows that are gone, appends the ones that appeared, and leaves the rest
-	// where they were.
 	void Refresh()
 	{
-		std::vector<HWND> Found;
+		static std::vector<HWND> Found;
+		static std::vector<DockButton> Merged;
+		static std::vector<DockButton> Listed;
+		static std::unordered_set<HWND> Present;
+		static std::unordered_set<HWND> Kept;
+
+		Found.clear();
+		Merged.clear();
+		Listed.clear();
+		Present.clear();
+		Kept.clear();
 
 		EnumWindows(EnumProc, (LPARAM)&Found);
 
-		std::vector<HWND> Ordered;
+		Present.insert(Found.begin(), Found.end());
 
-		for (size_t i = 0; i < gButtons.size(); ++i)
+		for (DockButton& Existing : gButtons)
 		{
-			if (std::find(Found.begin(), Found.end(), gButtons[i]) != Found.end())
+			if (Present.count(Existing.Window))
 			{
-				Ordered.push_back(gButtons[i]);
+				Kept.insert(Existing.Window);
+
+				Merged.push_back(std::move(Existing));
 			}
 		}
 
-		for (size_t i = 0; i < Found.size(); ++i)
+		for (HWND hwnd : Found)
 		{
-			if (std::find(Ordered.begin(), Ordered.end(), Found[i]) == Ordered.end())
+			if (!Kept.count(hwnd))
 			{
-				Ordered.push_back(Found[i]);
+				DockButton New;
+
+				New.Window = hwnd;
+
+				Merged.push_back(std::move(New));
 			}
 		}
 
-		gButtons.swap(Ordered);
+		for (DockButton& Entry : Merged)
+		{
+			if (!Entry.ReadAt || gFrameCounter - Entry.ReadAt >= TitleRefreshFrames)
+			{
+				WCHAR Title[128] = { 0 };
+
+				GetWindowTextW(Entry.Window, Title, 128);
+
+				Entry.Title = Title;
+				Entry.ReadAt = gFrameCounter;
+			}
+
+			if (!Entry.Title.empty())
+			{
+				Listed.push_back(std::move(Entry));
+			}
+		}
+
+		gButtons.swap(Listed);
 	}
 
-	// Brings a window back and gives it the foreground.
 	void ActivateWindow(HWND Target)
 	{
-		// Only when it is actually minimized: SW_RESTORE on a maximized window
-		// would undo the maximization instead of raising it.
 		if (IsIconic(Target))
 		{
 			ShowWindow(Target, SW_RESTORE);
@@ -107,11 +168,6 @@ namespace
 			return;
 		}
 
-		// Windows only lets the process that owns the foreground hand it to
-		// another, and inside the container that is the program being viewed,
-		// never this one. Attaching this thread to the foreground thread's input
-		// queue makes it count as part of that thread, which is the classic shell
-		// workaround for the same restriction.
 		const HWND Foreground = GetForegroundWindow();
 		const DWORD ForegroundThread = Foreground ? GetWindowThreadProcessId(Foreground, NULL) : 0;
 		const DWORD ThisThread = GetCurrentThreadId();
@@ -124,46 +180,96 @@ namespace
 		}
 	}
 
-	// Where button Index starts, and how far apart the buttons are.
-	int ButtonLeft(int Index)
+	int ButtonWidthFor(int Width, size_t Count)
 	{
-		return ButtonGap + Index * (ButtonWidth + ButtonGap);
+		if (!Count || Width <= 0)
+		{
+			return ButtonWidthMax;
+		}
+
+		const int Room = Width - (int)(Count + 1) * ButtonGap;
+
+		if (Room <= 0)
+		{
+			return ButtonWidthMin;
+		}
+
+		const int Fit = Room / (int)Count;
+
+		return (Fit < ButtonWidthMin) ? ButtonWidthMin
+			: (Fit > ButtonWidthMax) ? ButtonWidthMax : Fit;
 	}
 
-	// Narrows the desktop's work area to leave the bottom Rows to the dock, the way a
-	// taskbar reserves the space it occupies, so maximized windows stop above it. The
-	// screen is unaffected: this changes what programs are told they can use.
+	int ButtonLeft(int Index, int Width)
+	{
+		return ButtonGap + Index * (ButtonWidthFor(Width, gButtons.size()) + ButtonGap);
+	}
+
+	int ButtonAt(int X, int Width)
+	{
+		const int Pitch = ButtonWidthFor(Width, gButtons.size()) + ButtonGap;
+
+		if (X < ButtonGap || X >= Width)
+		{
+			return -1;
+		}
+
+		if ((X - ButtonGap) % Pitch >= ButtonWidthFor(Width, gButtons.size()))
+		{
+			return -1;
+		}
+
+		const int Index = (X - ButtonGap) / Pitch;
+
+		if (Index < 0 || (size_t)Index >= gButtons.size())
+		{
+			return -1;
+		}
+
+		return Index;
+	}
+
 	void ReserveScreenBottom(int Rows)
 	{
 		RECT Area = { 0 };
 		Area.right = GetSystemMetrics(SM_CXSCREEN);
 		Area.bottom = GetSystemMetrics(SM_CYSCREEN) - Rows;
 
-		// No SPIF_SENDCHANGE: this runs before the program is started, so there
-		// is nothing yet that has cached the old work area, and the setting
-		// persists for whatever starts later.
 		if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &Area, 0))
 		{
-			Debug() << "Work area could not be reserved (err 0x" << hex << GetLastError() << ")" << endl;
+			Debug() << "Work area could not be reserved (err 0x" << std::hex << GetLastError() << ")" << std::endl;
 
 			return;
 		}
 
-		// Read it back rather than trusting the return value. This is the one part
-		// of the dock the container cannot show us, and a work area that quietly
-		// stayed full-screen would leave every maximized window behind it.
 		RECT Got = { 0 };
 
 		if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &Got, 0)
 			&& (Got.right != Area.right || Got.bottom != Area.bottom))
 		{
 			Debug() << "Work area stayed " << Got.right << "x" << Got.bottom
-			        << " rather than " << Area.right << "x" << Area.bottom << endl;
+			        << " rather than " << Area.right << "x" << Area.bottom << std::endl;
 
 			return;
 		}
 
-		Debug() << "Work area reserved: bottom " << Rows << " rows" << endl;
+		Debug() << "Work area reserved: bottom " << Rows << " rows" << std::endl;
+	}
+
+	void DrawButtonEdge(HDC Dc, const RECT& Cell, bool bSunken, HBRUSH Highlight, HBRUSH Shadow)
+	{
+		const HBRUSH First = bSunken ? Shadow : Highlight;
+		const HBRUSH Second = bSunken ? Highlight : Shadow;
+
+		RECT Top{ Cell.left, Cell.top, Cell.right, Cell.top + 1 };
+		RECT Left{ Cell.left, Cell.top, Cell.left + 1, Cell.bottom };
+		RECT Bottom{ Cell.left, Cell.bottom - 1, Cell.right, Cell.bottom };
+		RECT Right{ Cell.right - 1, Cell.top, Cell.right, Cell.bottom };
+
+		FillRect(Dc, &Top, First);
+		FillRect(Dc, &Left, First);
+		FillRect(Dc, &Bottom, Second);
+		FillRect(Dc, &Right, Second);
 	}
 }
 
@@ -174,81 +280,103 @@ void Dock::Open()
 		return;
 	}
 
-	ReserveScreenBottom(LAUNCHER_DOCK_HEIGHT);
+	ReserveScreenBottom(StripHeight());
 }
 
 bool Dock::Contains(int Y, int FrameHeight)
 {
-	return Enabled() && Y >= FrameHeight - LAUNCHER_DOCK_HEIGHT;
+	return Enabled() && Y >= FrameHeight - StripHeight();
 }
 
-void Dock::Draw(HDC Dc, int Width, int Height)
+void Dock::Draw(HDC Dc, int Width, int Height, int PointerX, int PointerY)
 {
 	if (!Enabled())
 	{
 		return;
 	}
 
+	++gFrameCounter;
+
 	Refresh();
 
-	// Created once. Three GDI objects per frame, thirty times a second, is churn
-	// for no reason.
-	static HBRUSH Background = CreateSolidBrush(RGB(32, 32, 32));
-	static HBRUSH Edge = CreateSolidBrush(RGB(70, 70, 70));
-	static HBRUSH Button = CreateSolidBrush(RGB(58, 58, 58));
-	static HBRUSH Active = CreateSolidBrush(RGB(0, 90, 158));
-	static HBRUSH Minimized = CreateSolidBrush(RGB(44, 44, 44));
-	static HFONT Font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+	static HBRUSH Background = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
+	static HBRUSH Hover = CreateSolidBrush(GetSysColor(COLOR_3DLIGHT));
+	static HBRUSH Active = CreateSolidBrush(GetSysColor(COLOR_ACTIVECAPTION));
+	static HBRUSH Highlight = CreateSolidBrush(GetSysColor(COLOR_3DHIGHLIGHT));
+	static HBRUSH Shadow = CreateSolidBrush(GetSysColor(COLOR_3DSHADOW));
+
+	static const COLORREF TextNormal = GetSysColor(COLOR_BTNTEXT);
+	static const COLORREF TextActive = GetSysColor(COLOR_CAPTIONTEXT);
+	static const COLORREF TextMinimized = GetSysColor(COLOR_GRAYTEXT);
+
+	static HFONT Font = []
+	{
+		NONCLIENTMETRICSW Metrics = { 0 };
+		Metrics.cbSize = sizeof(Metrics);
+
+		if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(Metrics), &Metrics, 0))
+		{
+			HFONT Made = CreateFontIndirectW(&Metrics.lfMenuFont);
+
+			if (Made)
+			{
+				return Made;
+			}
+		}
+
+		return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+	}();
+
+	const int Strip = StripHeight();
 
 	POINT OldOrigin;
-	SetViewportOrgEx(Dc, 0, Height - LAUNCHER_DOCK_HEIGHT, &OldOrigin);
+	SetViewportOrgEx(Dc, 0, Height - Strip, &OldOrigin);
 
-	RECT Strip{ 0, 0, Width, LAUNCHER_DOCK_HEIGHT };
-	FillRect(Dc, &Strip, Background);
+	RECT Bar{ 0, 0, Width, Strip };
+	FillRect(Dc, &Bar, Background);
 
-	// A line along the top, so the dock reads as chrome rather than as part of
-	// whatever window is behind it.
-	RECT Line{ 0, 0, Width, 1 };
-	FillRect(Dc, &Line, Edge);
+	RECT LineHighlight{ 0, 0, Width, 1 };
+	RECT LineShadow{ 0, 1, Width, 2 };
+	FillRect(Dc, &LineHighlight, Highlight);
+	FillRect(Dc, &LineShadow, Shadow);
 
 	HGDIOBJ OldFont = SelectObject(Dc, Font);
 	SetBkMode(Dc, TRANSPARENT);
 
 	const HWND Foreground = GetForegroundWindow();
+	const int PointerIndex = (PointerY >= Height - Strip) ? ButtonAt(PointerX, Width) : -1;
 
 	for (size_t i = 0; i < gButtons.size(); ++i)
 	{
-		const int x = ButtonLeft((int)i);
+		const int ButtonWidth = ButtonWidthFor(Width, gButtons.size());
+		const int x = ButtonLeft((int)i, Width);
 
 		if (x + ButtonWidth > Width)
 		{
 			break;
 		}
 
-		const HWND hwnd = gButtons[i];
+		const DockButton& Entry = gButtons[i];
+		const HWND hwnd = Entry.Window;
 		const bool bMinimized = IsIconic(hwnd) != FALSE;
 
-		// A minimized window can still be the foreground window: minimizing it does not
-		// necessarily hand the foreground anywhere, so testing the foreground alone would
-		// light up the button of a window that is not on screen at all.
 		const bool bActive = !bMinimized && hwnd == Foreground;
 
-		RECT Cell{ x, 2, x + ButtonWidth, LAUNCHER_DOCK_HEIGHT - 2 };
-		FillRect(Dc, &Cell, bActive ? Active : (bMinimized ? Minimized : Button));
+		RECT Cell{ x, 2, x + ButtonWidth, Strip - 2 };
 
-		WCHAR Title[128] = { 0 };
-		GetWindowTextW(hwnd, Title, 128);
+		HBRUSH Fill = bActive ? Active : ((int)i == PointerIndex ? Hover : Background);
 
-		SetTextColor(Dc, bActive ? RGB(255, 255, 255)
-			: (bMinimized ? RGB(150, 150, 150) : RGB(225, 225, 225)));
+		FillRect(Dc, &Cell, Fill);
+
+		DrawButtonEdge(Dc, Cell, bActive, Highlight, Shadow);
+
+		SetTextColor(Dc, bActive ? TextActive : (bMinimized ? TextMinimized : TextNormal));
 
 		RECT Text = Cell;
 		Text.left += 6;
 		Text.right -= 6;
 
-		// DT_NOPREFIX: an & in a window title is a literal character here, not an
-		// accelerator to underline.
-		DrawTextW(Dc, Title, -1, &Text,
+		DrawTextW(Dc, Entry.Title.c_str(), -1, &Text,
 			DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 	}
 
@@ -265,29 +393,14 @@ void Dock::Press(int X, int Y, int Width, int FrameHeight)
 
 	Refresh();
 
-	const int Pitch = ButtonWidth + ButtonGap;
+	const int Index = ButtonAt(X, Width);
 
-	if (X < ButtonGap || X >= Width)
+	if (Index < 0)
 	{
 		return;
 	}
 
-	// A click in the gap between two buttons belongs to neither of them.
-	if ((X - ButtonGap) % Pitch >= ButtonWidth)
-	{
-		return;
-	}
-
-	const int Index = (X - ButtonGap) / Pitch;
-
-	// Buttons that did not fit were never drawn, so there is nothing there to
-	// have clicked on.
-	if (Index < 0 || (size_t)Index >= gButtons.size())
-	{
-		return;
-	}
-
-	const HWND Target = gButtons[Index];
+	const HWND Target = gButtons[Index].Window;
 
 	if (!IsWindow(Target))
 	{
@@ -300,12 +413,36 @@ void Dock::Press(int X, int Y, int Width, int FrameHeight)
 	}
 	else if (Target == GetForegroundWindow())
 	{
-		// The toggle a taskbar button has. It is also the only way to minimize a
-		// window whose title bar is off-screen.
 		ShowWindow(Target, SW_MINIMIZE);
 	}
 	else
 	{
 		ActivateWindow(Target);
 	}
+}
+
+void Dock::Close(int X, int Y, int Width, int FrameHeight)
+{
+	if (!Contains(Y, FrameHeight))
+	{
+		return;
+	}
+
+	Refresh();
+
+	const int Index = ButtonAt(X, Width);
+
+	if (Index < 0)
+	{
+		return;
+	}
+
+	const HWND Target = gButtons[Index].Window;
+
+	if (!IsWindow(Target))
+	{
+		return;
+	}
+
+	PostMessageW(Target, WM_CLOSE, 0, 0);
 }

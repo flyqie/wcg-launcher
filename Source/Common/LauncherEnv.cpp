@@ -12,8 +12,6 @@ namespace
 {
 	std::wstring Read(const wchar_t* Name)
 	{
-		// GetEnvironmentVariableW returns 0 both for "not set" and for "set to
-		// empty", which are the same thing here.
 		const DWORD Length = GetEnvironmentVariableW(Name, NULL, 0);
 
 		if (Length == 0)
@@ -35,7 +33,6 @@ namespace
 		return Value;
 	}
 
-	// The same, for the one setting that is handed to libvncserver as a char*.
 	std::string ReadNarrow(const char* Name)
 	{
 		const DWORD Length = GetEnvironmentVariableA(Name, NULL, 0);
@@ -67,7 +64,6 @@ bool LauncherVnc()
 
 int LauncherVncPort()
 {
-	// Read once: the environment cannot change under a running process.
 	static const int Value = []
 	{
 		const std::string Text = ReadNarrow("LAUNCHER_VNC_PORT");
@@ -78,8 +74,6 @@ int LauncherVncPort()
 			errno = 0;
 			const long Port = strtol(Text.c_str(), &End, 10);
 
-			// Reject partial parses and overflow rather than accepting values such as
-			// "5900foo" as a valid port.
 			if (End != Text.c_str() && *End == '\0' && errno != ERANGE
 				&& Port >= 1024 && Port <= 65535)
 			{
@@ -95,8 +89,6 @@ int LauncherVncPort()
 
 const char* LauncherVncPassword()
 {
-	// Read once, and kept for the life of the process: libvncserver holds on to the
-	// pointer for as long as the screen does.
 	static const std::string Value = ReadNarrow("LAUNCHER_VNC_PW");
 
 	return Value.c_str();
@@ -141,8 +133,6 @@ bool LauncherResolution(int& Width, int& Height)
 	errno = 0;
 	const long H = wcstol(HeightText, &HeightEnd, 10);
 
-	// Require both dimensions to consume exactly their side of the value. This avoids
-	// silently accepting values such as 1024x768debug or 1024x768x600.
 	if (WidthEnd != WidthText + Separator
 		|| HeightEnd != Value.c_str() + Value.size()
 		|| SavedErrno == ERANGE || errno == ERANGE)
@@ -150,8 +140,6 @@ bool LauncherResolution(int& Width, int& Height)
 		return false;
 	}
 
-	// A sanity range, not a mode list: what the display driver actually accepts
-	// is checked by the driver itself.
 	if (W < 100 || H < 100 || W > 16384 || H > 16384)
 	{
 		return false;
@@ -165,8 +153,32 @@ bool LauncherResolution(int& Width, int& Height)
 
 bool LauncherDock()
 {
-	// Read once: this is asked for on every frame.
 	static const bool Enabled = LauncherFlag("LAUNCHER_DOCK");
 
 	return Enabled;
+}
+
+int LauncherFps()
+{
+	static const int Value = []
+	{
+		const std::string Text = ReadNarrow("LAUNCHER_FPS");
+
+		if (!Text.empty())
+		{
+			char* End = NULL;
+			errno = 0;
+			const long Fps = strtol(Text.c_str(), &End, 10);
+
+			if (End != Text.c_str() && *End == '\0' && errno != ERANGE
+				&& Fps >= LAUNCHER_FPS_MIN && Fps <= LAUNCHER_FPS_MAX)
+			{
+				return (int)Fps;
+			}
+		}
+
+		return LAUNCHER_FPS;
+	}();
+
+	return Value;
 }

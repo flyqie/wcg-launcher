@@ -4,30 +4,15 @@
 
 #include <vector>
 
-using namespace std;
-
 namespace
 {
-	// The framebuffer libvncserver serves, and the reference the next frame is compared
-	// against -- one buffer rather than two, so the comparison and the copy are the same
-	// pass over the same bytes.
-	//
-	// Owned here rather than pointed at Desktop's DIB, which is reused and reallocated
-	// when the display mode changes while libvncserver reads this from its own threads.
-	//
-	// libvncserver also writes into it, for viewers that do not support cursor shape
-	// updates: those get the cursor drawn into the picture. That is why the two buffers
-	// cannot be assumed identical just because no frame was captured in between.
-	vector<unsigned char> gFrameBuffer;
+	std::vector<unsigned char> gFrameBuffer;
 
-	// One rectangle of changed pixels.
 	struct Band
 	{
 		int X1, Y1, X2, Y2;
 	};
 
-	// Bounded: each rectangle costs the viewer a header and at least one tile, so a change
-	// fragmented past this is cheaper to send as one box. See Update.
 	const unsigned MaxBands = 32;
 
 	unsigned long long Read64(const unsigned char* Data)
@@ -55,19 +40,6 @@ void Frame::Attach(rfbScreenInfoPtr Screen, int Width, int Height)
 	Screen->frameBuffer = (char*)gFrameBuffer.data();
 }
 
-// Rows first: memcmp over a row is vectorised and settles an unchanged row in one call,
-// and an unchanged row is the common case. Only the rows that differ pay for the search
-// for the first and last pixel that changed, and only the span between them is copied.
-//
-// Then rectangles. A single bounding box over every change is the wrong shape for a
-// desktop: a caret blinking in a text field and a clock updating in the tray are two
-// small changes at opposite corners whose box is the whole screen. Consecutive changed
-// rows whose spans overlap become one rectangle instead, so a frame costs what changed
-// rather than what it is spread across.
-//
-// Marking a rectangle wider than the pixels actually copied is safe, and the bands rely
-// on it: anything inside a rectangle that did not change is already correct in the
-// framebuffer.
 int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 	unsigned long long& ChangedArea)
 {
@@ -75,19 +47,13 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 
 	if (Captured.Width != Screen->width || Captured.Height != Screen->height)
 	{
-		// The display mode changed under us. Hand libvncserver a new framebuffer
-		// at the new size and it tells every connected viewer about it.
-		// Keep the old storage alive until libvncserver has locked out readers and
-		// switched the screen pointer. Resizing the live vector first can free it.
-		vector<unsigned char> Replacement((size_t)Captured.Width * Captured.Height * 4, 0);
+		std::vector<unsigned char> Replacement((size_t)Captured.Width * Captured.Height * 4, 0);
 
 		rfbNewFramebuffer(Screen, (char*)Replacement.data(),
 			Captured.Width, Captured.Height, 8, 3, 4);
 
 		gFrameBuffer.swap(Replacement);
 
-		// rfbNewFramebuffer rebuilds the pixel format from the byte count, which
-		// undoes the shifts set when the screen was created.
 		ApplyServerFormat(Screen);
 	}
 
@@ -99,8 +65,6 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 	unsigned BandCount = 0;
 	bool bTooFragmented = false;
 
-	// The bounds of everything that changed, for the case where there are too many
-	// rectangles to be worth sending.
 	int MinX = Captured.Width;
 	int MinY = -1;
 	int MaxX = -1;
@@ -116,14 +80,6 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 			continue;
 		}
 
-		// Where the change starts and stops, two pixels at a time where it can be.
-		//
-		// A comparison per pixel is a thousand branches for a thousand-pixel row, and
-		// a full-screen change is 768 of those rows -- which is the frame where the
-		// encoder is expensive too, so it is the one that has to be cheap here. The
-		// paired loop stops on anything it cannot pair, and both ends are finished
-		// pixel by pixel, so an odd width and a change one pixel wide are both just
-		// the slow path rather than a wrong answer.
 		int First = 0;
 
 		while (First + 1 < Captured.Width
@@ -170,8 +126,6 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 			continue;
 		}
 
-		// The row directly under the previous rectangle, reaching into it: the same
-		// change carrying on downwards, so it is the same rectangle.
 		if (BandCount
 			&& y == Bands[BandCount - 1].Y2
 			&& First < Bands[BandCount - 1].X2
@@ -189,8 +143,6 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 
 		if (BandCount == MaxBands)
 		{
-			// Too fragmented to describe as rectangles at all. One box over the lot,
-			// which is what this did on every frame before it did this.
 			bTooFragmented = true;
 
 			continue;
@@ -209,8 +161,6 @@ int Frame::Update(rfbScreenInfoPtr Screen, const Desktop::Frame& Captured,
 		return 0;
 	}
 
-	// Half-open, and libvncserver clamps it: rfbMarkRectAsModified(screen, x1,
-	// y1, x2, y2) covers x1 up to but not including x2.
 	if (bTooFragmented)
 	{
 		rfbMarkRectAsModified(Screen, MinX, MinY, MaxX, MaxY);
