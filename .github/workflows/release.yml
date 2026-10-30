@@ -28,8 +28,6 @@ jobs:
           }
           cmake -S . -B build -A x64 "-DLAUNCHER_BUILD=$build"
 
-      # The link is checked as part of this, and a build that picked up a DLL fails
-      # here rather than in a container.
       - name: Build
         run: cmake --build build --config Release --parallel $env:NUMBER_OF_PROCESSORS
 
@@ -42,16 +40,9 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item Output/x64/Release/Launcher.exe dist/
           Copy-Item Output/x64/Release/Launcher.pdb dist/
-          Copy-Item README.md dist/
           Copy-Item LICENSE dist/
-          Copy-Item THIRD-PARTY.md dist/
-          Copy-Item Docs dist/ -Recurse
           Compress-Archive -Path dist/* -DestinationPath $zip
 
-          # GPL-2.0-or-later: LibVNCServer is linked statically, so the corresponding
-          # source has to travel with the binary. The three submodules are part of it --
-          # each is pinned to a commit, and each is archived at that commit here rather
-          # than referenced, so the release is self-contained. See THIRD-PARTY.md.
           $src = "Launcher-$ver-source.zip"
           git archive --format=zip -o $src HEAD
           foreach ($d in 'libvncserver', 'zlib', 'libjpeg-turbo') {

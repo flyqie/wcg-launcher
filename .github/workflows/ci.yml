@@ -9,7 +9,6 @@ on:
 permissions:
   contents: read
 
-# A newer push supersedes an older run on the same branch or pull request.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -28,8 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Not recursive: libvncserver carries two submodules of its own -- a web
-          # client and a stylesheet for its documentation -- and neither is built.
           submodules: true
 
       - name: Configure
@@ -52,10 +49,6 @@ jobs:
           path: Output/x64/${{ matrix.config }}/Launcher.exe
           if-no-files-found: error
 
-  # The one switch in this project, and it changes what gets linked -- so it is worth
-  # building rather than assuming. cmake/Dependencies.cmake does not run at all on this
-  # path, which means what is exercised here is what cmake/LibVNCServer.cmake does when it
-  # has no compression libraries to hand it and no find_package to fall back on.
   pure:
     name: Release (LAUNCHER_VNC_PURE)
     runs-on: windows-latest
