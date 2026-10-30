@@ -66,8 +66,12 @@ void Clipboard::Publish(rfbScreenInfoPtr Screen, unsigned Viewers)
 		return;
 	}
 
+#ifdef LIBVNCSERVER_HAVE_LIBZ
 	rfbSendServerCutTextUTF8(Screen, &Utf8[0], (int)Utf8.size(),
 		Latin1.empty() ? NULL : &Latin1[0], (int)Latin1.size());
+#else
+	rfbSendServerCutText(Screen, &Utf8[0], (int)Utf8.size());
+#endif
 
 	Debug() << "Clipboard to the viewers: " << Utf8.size() << " bytes" << std::endl;
 }

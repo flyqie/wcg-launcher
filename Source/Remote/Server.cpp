@@ -129,7 +129,9 @@ namespace
 		Screen->ptrAddEvent = Input::OnPointer;
 		Screen->setXCutText = Clipboard::OnCutText;
 
+#ifdef LIBVNCSERVER_HAVE_LIBZ
 		Screen->setXCutTextUTF8 = Clipboard::OnCutTextUtf8;
+#endif
 
 		Clipboard::Seed();
 

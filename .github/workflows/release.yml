@@ -45,12 +45,20 @@ jobs:
 
           $src = "Launcher-$ver-source.zip"
           git archive --format=zip -o $src HEAD
-          foreach ($d in 'libvncserver', 'zlib', 'libjpeg-turbo') {
-            git -C "deps/$d" archive --format=zip -o "Launcher-$ver-source-$d.zip" HEAD
+
+          $root = (Get-Location).Path
+          $deps = 'libvncserver', 'zlib', 'libjpeg-turbo'
+          foreach ($d in $deps) {
+            git -C "deps/$d" archive --format=zip -o "$root/Launcher-$ver-source-$d.zip" HEAD
           }
 
           Get-FileHash $zip -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash)  $zip" } | Out-File -Encoding utf8 "$zip.sha256"
+
+          $wanted = @($zip, "$zip.sha256", $src) + ($deps | ForEach-Object { "Launcher-$ver-source-$_.zip" })
+          foreach ($f in $wanted) {
+            if (-not (Test-Path $f)) { throw "nothing to release: $f was not produced" }
+          }
 
       - uses: actions/upload-artifact@v4
         with:
