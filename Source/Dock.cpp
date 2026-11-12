@@ -1,8 +1,10 @@
 #include "Dock.h"
 
 #include <Windows.h>
+#include <Shlwapi.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <iostream>
 #include <string>
 #include <unordered_set>
@@ -51,36 +53,184 @@ namespace
 		return Value;
 	}
 
+	bool ReadProcessPath(HWND Window, wchar_t* Path, DWORD Length)
+	{
+		DWORD ProcessId = 0;
+
+		GetWindowThreadProcessId(Window, &ProcessId);
+
+		if (!ProcessId)
+		{
+			return false;
+		}
+
+		HANDLE Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ProcessId);
+
+		if (!Process)
+		{
+			return false;
+		}
+
+		const BOOL Read = QueryFullProcessImageNameW(Process, 0, Path, &Length);
+
+		CloseHandle(Process);
+
+		return Read != FALSE;
+	}
+
 	struct DockButton
 	{
 		HWND Window = NULL;
 		std::wstring Title;
-		unsigned long long ReadAt = 0;
+
+		HICON Icon = NULL;
+		unsigned IconTries = 0;
 	};
+
+	HICON AcquireIcon(HWND Window)
+	{
+		ULONG_PTR Result = 0;
+
+		static const WPARAM Kinds[] = { ICON_SMALL2, ICON_SMALL };
+
+		for (const WPARAM Kind : Kinds)
+		{
+			Result = 0;
+
+			SendMessageTimeoutW(Window, WM_GETICON, Kind, 0,
+				SMTO_ABORTIFHUNG, 25, &Result);
+
+			if (Result)
+			{
+				break;
+			}
+		}
+
+		if (!Result)
+		{
+			Result = GetClassLongPtrW(Window, GCLP_HICON);
+		}
+
+		if (!Result)
+		{
+			Result = GetClassLongPtrW(Window, GCLP_HICONSM);
+		}
+
+		if (Result)
+		{
+			HICON Copy = CopyIcon((HICON)Result);
+
+			if (Copy)
+			{
+				return Copy;
+			}
+		}
+
+		wchar_t Path[MAX_PATH] = { 0 };
+
+		if (ReadProcessPath(Window, Path, MAX_PATH))
+		{
+			HICON Extracted = ExtractIconW(NULL, Path, 0);
+
+			if (Extracted && Extracted != (HICON)1)
+			{
+				return Extracted;
+			}
+		}
+
+		return NULL;
+	}
+
+	void ReleaseIcon(DockButton& Entry)
+	{
+		if (Entry.Icon)
+		{
+			DestroyIcon(Entry.Icon);
+
+			Entry.Icon = NULL;
+		}
+	}
 
 	std::vector<DockButton> gButtons;
 
-	unsigned long long gFrameCounter = 0;
-
-	const unsigned long long TitleRefreshFrames = 15;
+	ULONGLONG gNextPoll = 0;
 
 	const int ButtonWidthMax = 150;
-	const int ButtonWidthMin = 44;
+	const int ButtonWidthMin = 64;
 	const int ButtonGap = 2;
 
-	bool IsDockWindow(HWND hwnd)
+	const ULONGLONG PollIntervalMs = 250;
+
+	const wchar_t* const ShellProcessMarks[] =
 	{
-		if (!IsWindowVisible(hwnd))
+		L"\\explorer.exe",
+		L"\\Windows\\SystemApps\\",
+		L"\\WindowsApps\\",
+		L"\\MicrosoftEdge\\",
+		L"\\SystemSettings.exe",
+		L"\\ApplicationFrameHost.exe",
+	};
+
+	bool ScreenExtent(int& Width, int& Height)
+	{
+		DEVMODEW Mode = { 0 };
+
+		Mode.dmSize = sizeof(Mode);
+
+		if (!EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &Mode))
 		{
-			return false;
+			Width = GetSystemMetrics(SM_CXSCREEN);
+			Height = GetSystemMetrics(SM_CYSCREEN);
+
+			return Width > 0 && Height > 0;
 		}
 
-		if (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)
-		{
-			return false;
-		}
+		Width = (int)Mode.dmPelsWidth;
+		Height = (int)Mode.dmPelsHeight;
 
 		return true;
+	}
+
+	bool IsShellProcess(HWND Window)
+	{
+		wchar_t Path[MAX_PATH] = { 0 };
+
+		if (!ReadProcessPath(Window, Path, MAX_PATH))
+		{
+			return false;
+		}
+
+		for (const wchar_t* Mark : ShellProcessMarks)
+		{
+			if (StrStrIW(Path, Mark))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	bool IsDockWindow(HWND Window)
+	{
+		if (!IsWindow(Window) || !IsWindowVisible(Window))
+		{
+			return false;
+		}
+
+		const LONG_PTR Style = GetWindowLongPtrW(Window, GWL_EXSTYLE);
+
+		if (Style & WS_EX_TOOLWINDOW)
+		{
+			return false;
+		}
+
+		if (GetWindow(Window, GW_OWNER) && !(Style & WS_EX_APPWINDOW))
+		{
+			return false;
+		}
+
+		return !IsShellProcess(Window);
 	}
 
 	BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam)
@@ -95,7 +245,40 @@ namespace
 		return TRUE;
 	}
 
-	void Refresh()
+	std::wstring ReadTitle(HWND Window)
+	{
+		wchar_t Title[128] = { 0 };
+
+		if (!InternalGetWindowText(Window, Title, (int)(sizeof(Title) / sizeof(Title[0]))))
+		{
+			GetWindowTextW(Window, Title, (int)(sizeof(Title) / sizeof(Title[0])));
+		}
+
+		return Title;
+	}
+
+	const unsigned IconTriesMax = 8;
+
+	void RefreshLabels(std::vector<DockButton>& List)
+	{
+		bool bIconAsked = false;
+
+		for (DockButton& Entry : List)
+		{
+			Entry.Title = ReadTitle(Entry.Window);
+
+			if (!bIconAsked && !Entry.Icon && Entry.IconTries < IconTriesMax)
+			{
+				bIconAsked = true;
+
+				++Entry.IconTries;
+
+				Entry.Icon = AcquireIcon(Entry.Window);
+			}
+		}
+	}
+
+	void Reconcile()
 	{
 		static std::vector<HWND> Found;
 		static std::vector<DockButton> Merged;
@@ -120,6 +303,12 @@ namespace
 				Kept.insert(Existing.Window);
 
 				Merged.push_back(std::move(Existing));
+
+				Existing.Icon = NULL;
+			}
+			else
+			{
+				ReleaseIcon(Existing);
 			}
 		}
 
@@ -135,49 +324,66 @@ namespace
 			}
 		}
 
+		RefreshLabels(Merged);
+
 		for (DockButton& Entry : Merged)
 		{
-			if (!Entry.ReadAt || gFrameCounter - Entry.ReadAt >= TitleRefreshFrames)
+			if (Entry.Title.empty())
 			{
-				WCHAR Title[128] = { 0 };
+				wchar_t Class[64] = { 0 };
 
-				GetWindowTextW(Entry.Window, Title, 128);
+				GetClassNameW(Entry.Window, Class, (int)(sizeof(Class) / sizeof(Class[0])));
 
-				Entry.Title = Title;
-				Entry.ReadAt = gFrameCounter;
+				Entry.Title = Class;
 			}
 
 			if (!Entry.Title.empty())
 			{
 				Listed.push_back(std::move(Entry));
+
+				Entry.Icon = NULL;
+			}
+			else
+			{
+				ReleaseIcon(Entry);
 			}
 		}
 
 		gButtons.swap(Listed);
 	}
 
-	void ActivateWindow(HWND Target)
+	void DropClosed()
 	{
-		if (IsIconic(Target))
+		for (size_t i = gButtons.size(); i-- > 0;)
 		{
-			ShowWindow(Target, SW_RESTORE);
-		}
+			if (!IsWindow(gButtons[i].Window) || !IsWindowVisible(gButtons[i].Window))
+			{
+				ReleaseIcon(gButtons[i]);
 
-		if (SetForegroundWindow(Target))
+				gButtons.erase(gButtons.begin() + (ptrdiff_t)i);
+			}
+		}
+	}
+
+	void Refresh()
+	{
+		const ULONGLONG Now = GetTickCount64();
+
+		if (Now >= gNextPoll)
 		{
+			gNextPoll = Now + PollIntervalMs;
+
+			Reconcile();
+
 			return;
 		}
 
-		const HWND Foreground = GetForegroundWindow();
-		const DWORD ForegroundThread = Foreground ? GetWindowThreadProcessId(Foreground, NULL) : 0;
-		const DWORD ThisThread = GetCurrentThreadId();
+		DropClosed();
+	}
 
-		if (ForegroundThread && ForegroundThread != ThisThread)
-		{
-			AttachThreadInput(ThisThread, ForegroundThread, TRUE);
-			SetForegroundWindow(Target);
-			AttachThreadInput(ThisThread, ForegroundThread, FALSE);
-		}
+	void ActivateWindow(HWND Target)
+	{
+		SwitchToThisWindow(Target, TRUE);
 	}
 
 	int ButtonWidthFor(int Width, size_t Count)
@@ -231,9 +437,17 @@ namespace
 
 	void ReserveScreenBottom(int Rows)
 	{
+		int ScreenWidth = 0;
+		int ScreenHeight = 0;
+
+		if (!ScreenExtent(ScreenWidth, ScreenHeight))
+		{
+			return;
+		}
+
 		RECT Area = { 0 };
-		Area.right = GetSystemMetrics(SM_CXSCREEN);
-		Area.bottom = GetSystemMetrics(SM_CYSCREEN) - Rows;
+		Area.right = ScreenWidth;
+		Area.bottom = ScreenHeight - Rows;
 
 		if (!SystemParametersInfoW(SPI_SETWORKAREA, 0, &Area, 0))
 		{
@@ -295,8 +509,6 @@ void Dock::Draw(HDC Dc, int Width, int Height, int PointerX, int PointerY)
 		return;
 	}
 
-	++gFrameCounter;
-
 	Refresh();
 
 	static HBRUSH Background = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
@@ -345,6 +557,7 @@ void Dock::Draw(HDC Dc, int Width, int Height, int PointerX, int PointerY)
 
 	const HWND Foreground = GetForegroundWindow();
 	const int PointerIndex = (PointerY >= Height - Strip) ? ButtonAt(PointerX, Width) : -1;
+	const int SmallIcon = GetSystemMetrics(SM_CXSMICON);
 
 	for (size_t i = 0; i < gButtons.size(); ++i)
 	{
@@ -376,8 +589,22 @@ void Dock::Draw(HDC Dc, int Width, int Height, int PointerX, int PointerY)
 		Text.left += 6;
 		Text.right -= 6;
 
-		DrawTextW(Dc, Entry.Title.c_str(), -1, &Text,
-			DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+		if (Entry.Icon)
+		{
+			const int Room = Cell.bottom - Cell.top - 2;
+			const int IconSize = (SmallIcon < Room) ? SmallIcon : Room;
+			const int IconTop = Cell.top + (Cell.bottom - Cell.top - IconSize) / 2;
+
+			DrawIconEx(Dc, Text.left, IconTop, Entry.Icon, IconSize, IconSize, 0, NULL, DI_NORMAL);
+
+			Text.left += IconSize + 4;
+		}
+
+		if (Text.right > Text.left)
+		{
+			DrawTextW(Dc, Entry.Title.c_str(), -1, &Text,
+				DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+		}
 	}
 
 	SelectObject(Dc, OldFont);
@@ -391,8 +618,6 @@ void Dock::Press(int X, int Y, int Width, int FrameHeight)
 		return;
 	}
 
-	Refresh();
-
 	const int Index = ButtonAt(X, Width);
 
 	if (Index < 0)
@@ -404,20 +629,20 @@ void Dock::Press(int X, int Y, int Width, int FrameHeight)
 
 	if (!IsWindow(Target))
 	{
+		Debug() << "Dock button for a window that no longer exists" << std::endl;
+
+		DropClosed();
+
 		return;
 	}
 
-	if (IsIconic(Target))
+	if (IsIconic(Target) || Target != GetForegroundWindow())
 	{
 		ActivateWindow(Target);
-	}
-	else if (Target == GetForegroundWindow())
-	{
-		ShowWindow(Target, SW_MINIMIZE);
 	}
 	else
 	{
-		ActivateWindow(Target);
+		ShowWindowAsync(Target, SW_MINIMIZE);
 	}
 }
 
@@ -428,8 +653,6 @@ void Dock::Close(int X, int Y, int Width, int FrameHeight)
 		return;
 	}
 
-	Refresh();
-
 	const int Index = ButtonAt(X, Width);
 
 	if (Index < 0)
@@ -441,6 +664,10 @@ void Dock::Close(int X, int Y, int Width, int FrameHeight)
 
 	if (!IsWindow(Target))
 	{
+		Debug() << "Dock button for a window that no longer exists" << std::endl;
+
+		DropClosed();
+
 		return;
 	}
 

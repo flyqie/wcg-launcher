@@ -21,7 +21,7 @@ add_executable(Launcher
 launcher_configure_target(Launcher)
 launcher_set_output_dir(Launcher)
 
-target_link_libraries(Launcher PRIVATE LauncherCommon Launcher::Vnc)
+target_link_libraries(Launcher PRIVATE LauncherCommon Launcher::Vnc Shlwapi)
 
 if(TARGET LauncherJpeg)
 	add_dependencies(Launcher LauncherJpeg)

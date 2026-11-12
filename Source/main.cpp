@@ -75,6 +75,11 @@ int main(int argc, char* argv[])
 		LocalFree(Arguments);
 	}
 
+	if (!Desktop::ClaimInstance())
+	{
+		return 1;
+	}
+
 	if (!Desktop::Open())
 	{
 		return 1;

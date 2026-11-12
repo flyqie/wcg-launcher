@@ -7,6 +7,8 @@
 
 namespace Desktop
 {
+	bool ClaimInstance();
+
 	bool Open();
 
 	bool StartProgram(const wchar_t* Command);

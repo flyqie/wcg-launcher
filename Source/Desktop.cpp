@@ -286,6 +286,38 @@ namespace
 	}
 }
 
+bool Desktop::ClaimInstance()
+{
+	static HANDLE Mutex = NULL;
+
+	if (Mutex)
+	{
+		return true;
+	}
+
+	Mutex = CreateMutexW(NULL, FALSE, L"Local\\Launcher-{8D5B1E4A-2C7F-4A93-9E51-3F6B7C0D2A18}");
+
+	if (!Mutex)
+	{
+		Debug() << "Instance mutex could not be created (err 0x" << std::hex << GetLastError() << ")"
+		        << std::endl;
+
+		return false;
+	}
+
+	if (GetLastError() == ERROR_ALREADY_EXISTS)
+	{
+		Debug() << "Another Launcher is already running" << std::endl;
+
+		CloseHandle(Mutex);
+		Mutex = NULL;
+
+		return false;
+	}
+
+	return true;
+}
+
 bool Desktop::Open()
 {
 	const bool bGranted = GrantEveryoneAccess();

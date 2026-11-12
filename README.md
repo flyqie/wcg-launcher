@@ -50,8 +50,8 @@ The image must be **Server Core** or later — Nano Server removes Win32k and ca
 windows — and its build must match the host's, or process isolation will refuse to start.
 
 `LAUNCHER_DOCK=1` adds a strip of window buttons along the bottom: a container has no shell,
-so a minimized window would otherwise be lost. Left-click restores, raises or minimizes;
-middle-click closes.
+so a minimized window would otherwise be lost. Each button carries the window's caption, and
+its icon when the window has one; left-click restores, raises or minimizes, middle-click closes.
 
 ## Configuration
 
